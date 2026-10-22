@@ -116,7 +116,7 @@ class RetroKickScene extends Phaser.Scene {
       [795, 260, 'GK'], [650, 145, 'DEF'], [650, 375, 'DEF'],
       [510, 205, 'MID'], [510, 315, 'MID'], [410, 155, 'FWD'], [410, 365, 'FWD'],
     ] as const;
-    home.forEach((p, i) => this.addPlayer('home', p[0], p[1], p[2], i + 1));
+    home.forEach((p, i) => const label = this.add.text(x, y, String(number), {('home', p[0], p[1], p[2], i + 1));
     away.forEach((p, i) => this.addPlayer('away', p[0], p[1], p[2], i + 1));
   }
 
