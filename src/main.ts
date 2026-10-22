@@ -9,6 +9,7 @@ type TeamSide = 'home' | 'away';
 interface Footballer {
   sprite: Phaser.GameObjects.Arc;
   shadow: Phaser.GameObjects.Arc;
+  label: Phaser.GameObjects.Text; // Add this line
   side: TeamSide;
   role: 'GK' | 'DEF' | 'MID' | 'FWD';
   homeX: number;
