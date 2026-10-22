@@ -282,8 +282,7 @@ private addPlayer(
   }
 
   private movePlayer(p: Footballer, dt: number, userControlled = false): void {
-    const oldX = p.sprite.x;
-    const oldY = p.sprite.y;
+    p.label.setPosition(p.sprite.x, p.sprite.y);
     p.sprite.x = Phaser.Math.Clamp(p.sprite.x + p.vx * dt, 31, FIELD_W - 31);
     p.sprite.y = Phaser.Math.Clamp(p.sprite.y + p.vy * dt, 31, FIELD_H - 31);
     p.shadow.setPosition(p.sprite.x + 3, p.sprite.y + 5);
