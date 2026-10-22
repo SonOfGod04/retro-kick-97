@@ -107,18 +107,26 @@ class RetroKickScene extends Phaser.Scene {
     g.fillTriangle(FIELD_W - 10, FIELD_H - 9, FIELD_W - 22, FIELD_H - 9, FIELD_W - 10, FIELD_H - 21);
   }
 
-  private createTeams(): void {
-    const home = [
-      [105, 260, 'GK'], [250, 145, 'DEF'], [250, 375, 'DEF'],
-      [390, 205, 'MID'], [390, 315, 'MID'], [490, 155, 'FWD'], [490, 365, 'FWD'],
-    ] as const;
-    const away = [
-      [795, 260, 'GK'], [650, 145, 'DEF'], [650, 375, 'DEF'],
-      [510, 205, 'MID'], [510, 315, 'MID'], [410, 155, 'FWD'], [410, 365, 'FWD'],
-    ] as const;
-    home.forEach((p, i) => const label = this.add.text(x, y, String(number), {('home', p[0], p[1], p[2], i + 1));
-    away.forEach((p, i) => this.addPlayer('away', p[0], p[1], p[2], i + 1));
-  }
+  
+private createTeams(): void {
+  const home = [
+    [105, 260, 'GK'], [250, 145, 'DEF'], [250, 375, 'DEF'],
+    [390, 205, 'MID'], [390, 315, 'MID'], [490, 155, 'FWD'], [490, 365, 'FWD'],
+  ] as const;
+
+  const away = [
+    [795, 260, 'GK'], [650, 145, 'DEF'], [650, 375, 'DEF'],
+    [510, 205, 'MID'], [510, 315, 'MID'], [410, 155, 'FWD'], [410, 365, 'FWD'],
+  ] as const;
+
+  home.forEach((p, i) => {
+    this.addPlayer('home', p[0], p[1], p[2], i + 1);
+  });
+
+  away.forEach((p, i) => {
+    this.addPlayer('away', p[0], p[1], p[2], i + 1);
+  });
+}
 
   private addPlayer(side: TeamSide, x: number, y: number, role: Footballer['role'], number: number): void {
     const color = side === 'home' ? 0x3aa9ff : 0xff5a5f;
