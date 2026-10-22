@@ -128,20 +128,48 @@ private createTeams(): void {
   });
 }
 
-  private addPlayer(side: TeamSide, x: number, y: number, role: Footballer['role'], number: number): void {
-    const color = side === 'home' ? 0x3aa9ff : 0xff5a5f;
-    const shadow = this.add.circle(x + 3, y + 5, role === 'GK' ? 15 : 13, 0x071b14, 0.3);
-    const sprite = this.add.circle(x, y, role === 'GK' ? 13 : 12, color, 1).setStrokeStyle(3, 0xf7f3df, 1);
-    // Tiny numbered shirt markers keep players readable at a glance.
-    this.add.text(x, y, String(number), {
-      fontFamily: 'Arial, sans-serif', fontSize: role === 'GK' ? '11px' : '10px',
-      color: '#10202a', fontStyle: 'bold',
-    }).setOrigin(0.5).setDepth(5).setData('playerNumber', number);
-    const player: Footballer = { sprite, shadow, side, role, homeX: x, homeY: y, vx: 0, vy: 0, number, cooldown: 0 };
-    sprite.setData('footballer', player);
-    this.players.push(player);
-  }
+  
+private addPlayer(
+  side: TeamSide,
+  x: number,
+  y: number,
+  role: Footballer['role'],
+  number: number
+): void {
+  const color = side === 'home' ? 0x3aa9ff : 0xff5a5f;
 
+  const shadow = this.add.circle(
+    x + 3, y + 5, role === 'GK' ? 15 : 13, 0x071b14, 0.3
+  );
+
+  const sprite = this.add.circle(
+    x, y, role === 'GK' ? 13 : 12, color, 1
+  ).setStrokeStyle(3, 0xf7f3df, 1);
+
+  const label = this.add.text(x, y, String(number), {
+    fontFamily: 'Arial, sans-serif',
+    fontSize: role === 'GK' ? '11px' : '10px',
+    color: '#10202a',
+    fontStyle: 'bold',
+  }).setOrigin(0.5).setDepth(5);
+
+  const player: Footballer = {
+    sprite,
+    shadow,
+    label,
+    side,
+    role,
+    homeX: x,
+    homeY: y,
+    vx: 0,
+    vy: 0,
+    number,
+    cooldown: 0,
+  };
+
+  sprite.setData('footballer', player);
+  this.players.push(player);
+}
   private createBall(): void {
     this.ballShadow = this.add.circle(FIELD_W / 2 + 2, FIELD_H / 2 + 4, 8, 0x071b14, 0.35).setDepth(10);
     this.ball = this.add.circle(FIELD_W / 2, FIELD_H / 2, 6, 0xf8f7ed, 1).setStrokeStyle(2, 0x17211e, 1).setDepth(11);
