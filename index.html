@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#101b19" />
+    <meta name="description" content="Retro Kick '97 — a playable retro 7-a-side browser football game." />
+    <title>Retro Kick '97</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <a class="brand" href="./" aria-label="Retro Kick 97 home">
+          <span class="brand-mark">RK<span>97</span></span>
+          <span class="brand-copy"><strong>RETRO KICK '97</strong><small>ARCADE FOOTBALL CLUB</small></span>
+        </a>
+        <div class="top-status"><span class="live-dot"></span> ARCADE MODE <span class="top-divider">/</span> 7-A-SIDE</div>
+      </header>
+      <main class="layout">
+        <section class="intro">
+          <div class="eyebrow"><span>01</span> THE BEAUTIFUL GAME, OLD-SCHOOL STYLE</div>
+          <h1>One pitch.<br/><em>One more goal.</em></h1>
+          <p>Fast, classic football with tiny teams, big moments, and zero downloads. Take on the CPU and write your own arcade legend.</p>
+          <div class="feature-row">
+            <span><b>07</b> PLAYERS PER SIDE</span>
+            <span><b>90s</b> ARCADE VIBE</span>
+            <span><b>01</b> KEYBOARD</span>
+          </div>
+        </section>
+        <section class="game-panel" aria-label="Football game">
+          <div class="match-header">
+            <div class="team team-home"><span class="team-badge home-badge">R</span><span><small>HOME</small><strong>ROCKETS</strong></span></div>
+            <div class="scoreboard"><div class="score"><span id="home-score">0</span><i>:</i><span id="away-score">0</span></div><div class="match-clock"><span class="clock-dot"></span><span id="clock">02:00</span> <span id="period">FIRST HALF</span></div></div>
+            <div class="team team-away"><span><small>AWAY</small><strong>COMETS</strong></span><span class="team-badge away-badge">C</span></div>
+          </div>
+          <div class="canvas-wrap" id="canvas-wrap">
+            <div id="game-root"></div>
+            <div class="canvas-hint" id="canvas-hint">CLICK THE PITCH TO START</div>
+          </div>
+          <div class="game-footer">
+            <div class="status-message" id="status-message"><span class="status-icon">▶</span> Ready for kick-off</div>
+            <button class="restart-button" id="restart-button" type="button"><span>↻</span> NEW MATCH</button>
+          </div>
+        </section>
+        <aside class="side-column">
+          <section class="info-card">
+            <div class="card-heading"><span class="card-icon">⌨</span><h2>CONTROLS</h2><span class="card-number">01 / 03</span></div>
+            <div class="control-list">
+              <div class="control-item"><span class="keycap">W</span><span class="keycap">A</span><span class="keycap">S</span><span class="keycap">D</span><span class="control-label">Move player</span></div>
+              <div class="control-item"><span class="keycap wide">← ↑ ↓ →</span><span class="control-label">Move (alternate)</span></div>
+              <div class="control-item"><span class="keycap">X</span><span class="control-label">Pass / switch nearest player</span></div>
+              <div class="control-item"><span class="keycap">Z</span><span class="control-label">Shoot toward goal</span></div>
+              <div class="control-item"><span class="keycap">SPACE</span><span class="control-label">Tackle / challenge</span></div>
+              <div class="control-item"><span class="keycap">SHIFT</span><span class="control-label">Sprint</span></div>
+              <div class="control-item"><span class="keycap">P</span><span class="control-label">Pause / resume</span></div>
+            </div>
+          </section>
+          <section class="info-card match-card">
+            <div class="card-heading"><span class="card-icon">◷</span><h2>MATCH DAY</h2><span class="card-number">02 / 03</span></div>
+            <div class="match-fact"><span>FORMAT</span><strong>7 vs 7</strong></div>
+            <div class="match-fact"><span>HALVES</span><strong>2 × 2 minutes</strong></div>
+            <div class="match-fact"><span>OPPONENT</span><strong>CPU Comets</strong></div>
+            <div class="match-fact"><span>YOUR TEAM</span><strong><i class="swatch blue"></i> Rockets</strong></div>
+            <div class="match-fact"><span>CPU TEAM</span><strong><i class="swatch red"></i> Comets</strong></div>
+          </section>
+          <section class="tip-card">
+            <div class="card-heading"><span class="card-icon">✦</span><h2>MANAGER'S TIP</h2><span class="card-number">03 / 03</span></div>
+            <p>Get close to the ball, then press <kbd>Z</kbd> to shoot. A clear lane to goal gives your shot a better chance.</p>
+          </section>
+        </aside>
+        <footer class="page-footer"><span>© 1997–NOW <b>RETRO KICK</b></span><span>BUILT FOR THE LOVE OF THE GAME <i>●</i></span><a href="https://github.com/" target="_blank" rel="noreferrer">GITHUB READY ↗</a></footer>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
