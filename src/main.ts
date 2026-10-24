@@ -4,6 +4,7 @@ import './style.css';
 const FIELD_W = 900;
 const FIELD_H = 520;
 const HALF_SECONDS = 120;
+const EXTRA_TIME = 30;
 
 type TeamSide = 'home' | 'away';
 interface Footballer {
