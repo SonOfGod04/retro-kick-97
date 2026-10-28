@@ -1119,4 +1119,4 @@ class RetroKickScene extends Phaser.Scene {
     this.shootoutText = this.add.text(FIELD_W / 2, 40, '', {
       fontFamily: 'Arial, sans-serif', fontSize: '18px', color: '#fff7df', fontStyle: 'bold',
     }).setOrigin(0.5).setDepth(60);
-    this.setMessage(`Penalty shootout!');
+    this.setMessage(`Penalty shtout!');
