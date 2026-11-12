@@ -1,24 +1,14 @@
 import Phaser from 'phaser';
 import './style.css';
 
-/* ------------------------------------------------------------------ *
- *  RETRO KICK '97 — v2
- *  Better graphics, crowd + goal screams, celebrations, slide tackles
- *  & fouls, throw-ins, corners, goal kicks, free kicks, penalties,
- *  extra time and a penalty shoot-out.
- *
- *  Controls
- *   Move: WASD / arrows   Sprint: SHIFT   Pass: X   Shoot: Z (hold to charge)
- *   Slide tackle: SPACE   Switch player: X (when not on the ball)
- *   Set pieces: arrows aim, X pass/cross/throw, Z shoot/long
- *   Defending a penalty: ↑ / ↓ to dive      P pause · M mute
- * ------------------------------------------------------------------ */
-
 const FIELD_W = 900;
 const FIELD_H = 520;
 const HALF_SECONDS = 120;
-const EXTRA_SECONDS = 45;
-const EXTRA_TIME_ON_DRAW = true; // draw after 2 halves -> extra time -> shoot-out
+const EXTRA_TIME_SECONDS = 60;
+
+type TeamSide = 'home' | 'away';
+type SetPieceType = 'none' | 'throwin' | 'corner' | 'freekick' | 'penalty' | 'goalkick' | 'kickoff';
+type GameState = 'playing' | 'celebrating' | 'setpiece' | 'halftime' | 'fulltime' | 'extratime';
 
 const L = 19, R = FIELD_W - 19, T = 19, B = FIELD_H - 19, CY = FIELD_H / 2;
 const GOAL_HALF = 52, BAR_H = 36, GRAVITY = 520;
