@@ -10,51 +10,96 @@ type TeamSide = 'home' | 'away';
 type SetPieceType = 'none' | 'throwin' | 'corner' | 'freekick' | 'penalty' | 'goalkick' | 'kickoff';
 type GameState = 'playing' | 'celebrating' | 'setpiece' | 'halftime' | 'fulltime' | 'extratime';
 
-const L = 19, R = FIELD_W - 19, T = 19, B = FIELD_H - 19, CY = FIELD_H / 2;
-const GOAL_HALF = 52, BAR_H = 36, GRAVITY = 520;
-const BOX_W = 118, BOX_TOP = 135, BOX_BOT = 385, SPOT_X = 112;
-const SLIDE_TIME = 0.32;
-
-type TeamSide = 'home' | 'away';
-type Role = 'GK' | 'DEF' | 'MID' | 'FWD';
-type PieceKind = 'throw' | 'corner' | 'goalkick' | 'freekick' | 'penalty';
-type Mode = 'play' | 'setpiece' | 'celebrate' | 'ended';
-
-const NAMES: Record<TeamSide, string> = { home: 'Rockets', away: 'Comets' };
-const TEAM_HEX: Record<TeamSide, string> = { home: '#3aa9ff', away: '#ff5a5f' };
-
-const clamp = Phaser.Math.Clamp;
-const dirOf = (s: TeamSide): number => (s === 'home' ? 1 : -1);
-const other = (s: TeamSide): TeamSide => (s === 'home' ? 'away' : 'home');
-const attackX = (s: TeamSide): number => (s === 'home' ? R : L);
-const ownX = (s: TeamSide): number => (s === 'home' ? L : R);
-const dist = (ax: number, ay: number, bx: number, by: number): number => Math.hypot(ax - bx, ay - by);
-const rand = (a: number, b: number): number => a + Math.random() * (b - a);
-const inBox = (defending: TeamSide, x: number, y: number): boolean =>
-  y > BOX_TOP && y < BOX_BOT && (defending === 'home' ? x < L + BOX_W : x > R - BOX_W);
-
 interface Footballer {
-  side: TeamSide; role: Role; number: number;
-  x: number; y: number; vx: number; vy: number; homeX: number; homeY: number;
-  facing: number; run: number;
-  cooldown: number; stun: number; slide: number; slideAng: number; slideCool: number; slideHit: boolean;
-  think: number; diveT: number; diveTy: number;
-  shadow: Phaser.GameObjects.Ellipse;
-  body: Phaser.GameObjects.Container;
-  feet: [Phaser.GameObjects.Arc, Phaser.GameObjects.Arc];
-  tag: Phaser.GameObjects.Text;
-  ring: Phaser.GameObjects.Arc;
+  sprite: Phaser.GameObjects.Container;
+  body: Phaser.GameObjects.Arc;
+  head: Phaser.GameObjects.Arc;
+  shadow: Phaser.GameObjects.Arc;
+  label: Phaser.GameObjects.Text;
+  side: TeamSide;
+  role: 'GK' | 'DEF' | 'MID' | 'FWD';
+  homeX: number;
+  homeY: number;
+  vx: number;
+  vy: number;
+  number: number;
+  cooldown: number;
+  celebrating: boolean;
+  tackled: boolean;
+  tackleTimer: number;
+  facing: number; // angle in radians
 }
 
-interface SetPiece {
-  kind: PieceKind; side: TeamSide; x: number; y: number; taker: Footballer;
-  timer: number; wait: number; ready: boolean; readyT: number;
-  aimX: number; aimY: number; aimPx: number; prompted: boolean;
-  targets: Map<Footballer, { x: number; y: number }>;
-}
-interface Celebration { side: TeamSide; scorer: Footballer; t: number; fx: number; fy: number; slid: boolean }
-interface Confetti { x: number; y: number; vx: number; vy: number; w: number; h: number; c: number; life: number; ph: number }
-interface Shootout { home: number; away: number; taken: Record<TeamSide, number>; hist: Record<TeamSide, string[]>; turn: TeamSide }
+class RetroKickScene extends Phaser.Scene {
+  private players: Footballer[] = [];
+  private ball!: Phaser.GameObjects.Arc;
+  private ballShadow!: Phaser.GameObjects.Arc;
+  private ballZ = 0; // ball height for throw-ins
+  private ballVz = 0;
+  private ballVx = 0;
+  private ballVy = 0;
+  private possession: TeamSide | null = 'home';
+  private controlled!: Footballer;
+  private keys!: Record<string, Phaser.Input.Keyboard.Key>;
+  private homeScore = 0;
+  private awayScore = 0;
+  private remaining = HALF_SECONDS;
+  private lastClockTick = 0;
+  private half = 1;
+  private paused = true;
+  private pauseKeyHeld = false;
+  private ended = false;
+  private kickoffLock = 0;
+  private message = 'Ready for kick-off';
+  private gameState: GameState = 'playing';
+  private setPiece: SetPieceType = 'none';
+  private setPieceTimer = 0;
+  private celebrationTimer = 0;
+  private lastTouchSide: TeamSide = 'home';
+  private pitchGraphics!: Phaser.GameObjects.Graphics;
+  private crowdGraphics!: Phaser.GameObjects.Graphics;
+  private effectsLayer!: Phaser.GameObjects.Container;
+  private goalFlashText?: Phaser.GameObjects.Text;
+  private confettiParticles: Phaser.GameObjects.Rectangle[] = [];
+  private cameraShakeTime = 0;
+  private hint!: HTMLElement | null;
+  private homeScoreEl!: HTMLElement | null;
+  private awayScoreEl!: HTMLElement | null;
+  private clockEl!: HTMLElement | null;
+  private periodEl!: HTMLElement | null;
+  private statusEl!: HTMLElement | null;
+
+  constructor() { super('RetroKickScene'); }
+
+  create(): void {
+    this.drawPitch();
+    this.createTeams();
+    this.createBall();
+    this.effectsLayer = this.add.container(0, 0).setDepth(100);
+
+    this.keys = this.input.keyboard!.addKeys(
+      'W,A,S,D,UP,DOWN,LEFT,RIGHT,X,Z,SPACE,SHIFT,P,ENTER'
+    ) as Record<string, Phaser.Input.Keyboard.Key>;
+
+    this.homeScoreEl = document.getElementById('home-score');
+    this.awayScoreEl = document.getElementById('away-score');
+    this.clockEl = document.getElementById('clock');
+    this.periodEl = document.getElementById('period');
+    this.statusEl = document.getElementById('status-message');
+    this.hint = document.getElementById('canvas-hint');
+
+    this.input.on('pointerdown', () => {
+      if (this.ended) this.resetMatch();
+      this.paused = false;
+      if (this.hint) this.hint.style.display = 'none';
+      this.setMessage('Play on!');
+    });
+
+    document.getElementById('restart-button')?.addEventListener('click', () => this.resetMatch());
+    this.selectControlled();
+    this.updateHud();
+    this.setMessage('Ready for kick-off');
+  }
 
 /* ============================== AUDIO ============================== */
 class Sfx {
