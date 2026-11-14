@@ -68,7 +68,6 @@ interface Restart extends RestartSpec {
 }
 
 // Per-restart parameters. indirect = cannot score until another player touches.
-// limit = four-second rule (null = no violation, auto-takes after 8 s).
 const RESTART_INFO: Record<RestartKind, {
   label: string; min: number; max: number; lift: number; indirect: boolean; limit: number | null;
 }> = {
