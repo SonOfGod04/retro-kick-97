@@ -8,31 +8,40 @@ const HALF_SECONDS = 120;
 const EXTRA_TIME_SECONDS = 60;
 const CENTER_X = FIELD_W / 2;
 const CENTER_Y = FIELD_H / 2;
-const LINE = 19;                 // touchline / goal-line inset
-const GOAL_HALF = 52;            // half goal mouth
-const BOX_DEPTH = 137;           // penalty area depth from goal line
-const BOX_HALF_H = 125;          // penalty area half-height
-const PENALTY_SPOT_X = 112;      // distance of 1st penalty spot from edge
-const SECOND_SPOT_X = 235;       // 10 m (second penalty) spot
-const FOUL_LIMIT = 5;            // 6th+ accumulated foul -> 10 m free kick
+const LINE = 19;
+const GOAL_HALF = 52;
+const BOX_DEPTH = 137;
+const BOX_HALF_H = 125;
+const PENALTY_SPOT_X = 112;
+const SECOND_SPOT_X = 235;
+const FOUL_LIMIT = 5;
 const FOUR_SECONDS = 4;
 const CONTACT_RADIUS = 15;
+const SHADOW_DY = 6;
 
 type TeamSide = 'home' | 'away';
 type GameState = 'playing' | 'restart' | 'goal' | 'fulltime';
 type RestartKind =
   | 'kickoff' | 'kick-in' | 'corner' | 'goal-clearance'
   | 'free-kick' | 'indirect-free-kick' | 'penalty' | 'second-penalty';
+type ActionType = 'pass' | 'shoot' | 'throw' | 'tackle' | 'jump' | 'miss';
+type AnimName = 'idle' | 'walk' | 'run' | 'sprint' | 'turn' | 'celebrate' | ActionType;
 
 interface Pt { x: number; y: number }
 interface RestartSpec { kind: RestartKind; team: TeamSide; x: number; y: number }
 interface OutOfPlay { kind: 'goal' | 'kick-in' | 'corner' | 'goal-clearance'; team: TeamSide; x: number; y: number }
 
+interface Kit {
+  jersey: number; jerseyDark: number; shorts: number; socks: number; boots: number;
+  skin: number; skinShade: number; hair: number; glove: number; longSleeves: boolean;
+}
+interface Action { type: ActionType; t: number; dur: number; aim?: number }
+interface Gait { legAmp: number; armAmp: number; lean: number; elbowIn: number; cycle: number; stance: number }
+
 interface Footballer {
   sprite: Phaser.GameObjects.Container;
-  body: Phaser.GameObjects.Arc;
-  head: Phaser.GameObjects.Arc;
-  shorts: Phaser.GameObjects.Rectangle;
+  ring: Phaser.GameObjects.Arc;              // selection ring (controlled player only)
+  rig: Phaser.GameObjects.Graphics;          // body, head, arms, legs — redrawn every frame
   shadow: Phaser.GameObjects.Ellipse;
   label: Phaser.GameObjects.Text;
   side: TeamSide;
@@ -45,8 +54,16 @@ interface Footballer {
   cooldown: number;
   celebrating: boolean;
   celebrateUntil: number;
-  tackling: number;
-  facing: number;
+  facing: number;                            // gameplay facing (used for ball carrying)
+  // Phase 2 animation state
+  kit: Kit;
+  vis: number;                               // smoothed visual heading
+  stride: number;                            // gait phase
+  speed: number;                             // measured speed (px/s)
+  lastX: number;
+  lastY: number;
+  anim: AnimName;
+  act: Action | null;
 }
 
 interface Particle {
@@ -59,7 +76,7 @@ interface Restart extends RestartSpec {
   targets: Map<Footballer, Pt>;
   elapsed: number;
   ready: boolean;
-  timer: number;        // seconds left (4 s rule, or 8 s auto-take for kick-off/penalties)
+  timer: number;
   cpuDelay: number;
   aim: number;
   power: number;
@@ -67,7 +84,6 @@ interface Restart extends RestartSpec {
   baseMsg: string;
 }
 
-// Per-restart parameters. indirect = cannot score until another player touches.
 const RESTART_INFO: Record<RestartKind, {
   label: string; min: number; max: number; lift: number; indirect: boolean; limit: number | null;
 }> = {
@@ -81,7 +97,96 @@ const RESTART_INFO: Record<RestartKind, {
   'second-penalty':     { label: '10m FREE KICK',  min: 260, max: 500, lift: 20, indirect: false, limit: null },
 };
 
-// ═══════════════ PURE RULE FUNCTIONS (no Phaser — unit-testable) ═══════════════
+// ═══════════════ PHASE 2: ANIMATION DATA (pure, testable) ═══════════════
+
+// Action timing. `start` = where the animation begins when triggered by real gameplay,
+// so the strike frame lines up with the ball leaving the foot/hand.
+const ACTIONS: Record<ActionType, { dur: number; start: number }> = {
+  pass:   { dur: 0.34, start: 0.2 },
+  shoot:  { dur: 0.45, start: 0.3 },
+  throw:  { dur: 0.40, start: 0.15 },
+  tackle: { dur: 0.40, start: 0 },
+  jump:   { dur: 0.50, start: 0 },
+  miss:   { dur: 1.20, start: 0 },
+};
+
+// Keyframes [progress, value]
+const KF = {
+  passFoot:    [[0, 0], [0.3, -6], [0.55, 11], [1, 0]],
+  shootFoot:   [[0, 0], [0.4, -11], [0.6, 15], [0.8, 10], [1, 0]],
+  shootLean:   [[0, 0], [0.4, -1], [0.6, 3.5], [1, 0.5]],
+  tackleSlide: [[0, 0], [0.35, 9], [0.8, 9], [1, 0]],
+  throwHand:   [[0, -3], [0.3, -7], [0.55, 12], [1, 2]],
+  throwLean:   [[0, 0], [0.3, -1.2], [0.55, 2.5], [1, 0]],
+};
+
+// Gait by speed: [speed, legAmp, armAmp, lean, elbowIn, strideCycle(px), stance]
+const GAIT_TABLE: number[][] = [
+  [0,   0,    0,   0,   0,   40, 4.0],   // idle
+  [70,  4.5,  3.5, 0,   0.5, 34, 3.6],   // walk
+  [150, 7.5,  6.0, 1.5, 2.0, 46, 3.2],   // run
+  [200, 8.5,  7.0, 2.2, 2.8, 50, 3.0],   // fast run
+  [260, 10.5, 8.5, 3.6, 3.8, 56, 2.8],   // sprint
+];
+const GAIT_TMP: Gait = { legAmp: 0, armAmp: 0, lean: 0, elbowIn: 0, cycle: 40, stance: 4 };
+
+function keyframe(t: number, keys: number[][]): number {
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) {
+    if (t <= keys[i][0]) {
+      const [t0, v0] = keys[i - 1];
+      const [t1, v1] = keys[i];
+      return v0 + (v1 - v0) * ((t - t0) / (t1 - t0));
+    }
+  }
+  return keys[keys.length - 1][1];
+}
+
+function gaitFor(speed: number, out: Gait): Gait {
+  const s = Math.max(0, speed);
+  let i = 0;
+  while (i < GAIT_TABLE.length - 2 && s > GAIT_TABLE[i + 1][0]) i++;
+  const a = GAIT_TABLE[i];
+  const b = GAIT_TABLE[i + 1];
+  const t = Phaser.Math.Clamp((s - a[0]) / (b[0] - a[0]), 0, 1);
+  const l = (k: number) => a[k] + (b[k] - a[k]) * t;
+  out.legAmp = l(1); out.armAmp = l(2); out.lean = l(3);
+  out.elbowIn = l(4); out.cycle = l(5); out.stance = l(6);
+  return out;
+}
+
+function classifyLocomotion(speed: number): 'idle' | 'walk' | 'run' | 'sprint' {
+  if (speed < 25) return 'idle';
+  if (speed < 95) return 'walk';
+  if (speed < 225) return 'run';
+  return 'sprint';
+}
+
+const SKINS: number[][] = [[0xf4c892, 0xd9a877], [0xd9a066, 0xb98048], [0x8d5a3b, 0x6e4328], [0x5b3a29, 0x452b1e]];
+const HAIRS: number[] = [0x2a1810, 0x111111, 0x3a2418, 0x6b4a2b];
+
+function makeKit(side: TeamSide, role: Footballer['role'], number: number): Kit {
+  const isGK = role === 'GK';
+  const [skin, skinShade] = SKINS[(number * 3 + (side === 'home' ? 0 : 2)) % SKINS.length];
+  const hair = HAIRS[(number + (side === 'home' ? 1 : 3)) % HAIRS.length];
+  if (isGK) {
+    return {
+      jersey: side === 'home' ? 0x9b59b6 : 0xff9800,
+      jerseyDark: side === 'home' ? 0x6c3483 : 0xc77700,
+      shorts: 0x333333, socks: 0x333333, boots: 0x111111,
+      skin, skinShade, hair, glove: 0xffe14d, longSleeves: true,
+    };
+  }
+  return {
+    jersey: side === 'home' ? 0x2d7fff : 0xff3b47,
+    jerseyDark: side === 'home' ? 0x0a4fb5 : 0xb01822,
+    shorts: side === 'home' ? 0x0a4fb5 : 0xb01822,
+    socks: 0xffffff, boots: 0x161616,
+    skin, skinShade, hair, glove: skin, longSleeves: false,
+  };
+}
+
+// ═══════════════ PURE RULE FUNCTIONS (Phase 1) ═══════════════
 const other = (s: TeamSide): TeamSide => (s === 'home' ? 'away' : 'home');
 const teamName = (s: TeamSide): string => (s === 'home' ? 'Rockets' : 'Comets');
 const dist = Phaser.Math.Distance.Between;
@@ -93,7 +198,7 @@ const clampPt = (x: number, y: number): Pt => ({
 function cornerSpec(attacker: TeamSide, ballY: number): RestartSpec {
   return {
     kind: 'corner', team: attacker,
-    x: attacker === 'home' ? FIELD_W - 22 : 22,           // home attacks right
+    x: attacker === 'home' ? FIELD_W - 22 : 22,
     y: ballY < CENTER_Y ? 22 : FIELD_H - 22,
   };
 }
@@ -102,7 +207,6 @@ function clearanceSpec(defender: TeamSide): RestartSpec {
   return { kind: 'goal-clearance', team: defender, x: defender === 'home' ? 55 : FIELD_W - 55, y: CENTER_Y };
 }
 
-/** Decides what happens when the ball is outside the lines. Home defends the LEFT goal. */
 function decideOutOfPlay(x: number, y: number, lastTouch: TeamSide): OutOfPlay | null {
   const onLeft = x < LINE;
   const onRight = x > FIELD_W - LINE;
@@ -110,14 +214,14 @@ function decideOutOfPlay(x: number, y: number, lastTouch: TeamSide): OutOfPlay |
     const defender: TeamSide = onLeft ? 'home' : 'away';
     const attacker = other(defender);
     if (Math.abs(y - CENTER_Y) <= GOAL_HALF) return { kind: 'goal', team: attacker, x, y };
-    if (lastTouch === defender) {                      // defender last touch -> corner
+    if (lastTouch === defender) {
       const c = cornerSpec(attacker, y);
       return { kind: 'corner', team: attacker, x: c.x, y: c.y };
     }
-    const g = clearanceSpec(defender);                 // attacker last touch -> GK clearance
+    const g = clearanceSpec(defender);
     return { kind: 'goal-clearance', team: defender, x: g.x, y: g.y };
   }
-  if (y < LINE || y > FIELD_H - LINE) {                // touchline -> kick-in to the other team
+  if (y < LINE || y > FIELD_H - LINE) {
     return {
       kind: 'kick-in', team: other(lastTouch),
       x: Phaser.Math.Clamp(x, 40, FIELD_W - 40),
@@ -127,7 +231,6 @@ function decideOutOfPlay(x: number, y: number, lastTouch: TeamSide): OutOfPlay |
   return null;
 }
 
-/** Foul -> restart for the FOULED team. foulNumber includes this foul. */
 function decideFoul(fouler: TeamSide, victimX: number, victimY: number, foulNumber: number): RestartSpec {
   const fouled = other(fouler);
   const inOwnBox =
@@ -137,7 +240,6 @@ function decideFoul(fouler: TeamSide, victimX: number, victimY: number, foulNumb
     return { kind: 'penalty', team: fouled, x: fouled === 'home' ? FIELD_W - PENALTY_SPOT_X : PENALTY_SPOT_X, y: CENTER_Y };
   }
   if (foulNumber > FOUL_LIMIT) {
-    // Foul spot farther from goal than the 10 m spot -> take it from the 10 m spot.
     const fartherThanSpot = fouler === 'home' ? victimX > SECOND_SPOT_X : victimX < FIELD_W - SECOND_SPOT_X;
     if (fartherThanSpot) {
       return { kind: 'second-penalty', team: fouled, x: fouled === 'home' ? FIELD_W - SECOND_SPOT_X : SECOND_SPOT_X, y: CENTER_Y };
@@ -147,38 +249,52 @@ function decideFoul(fouler: TeamSide, victimX: number, victimY: number, foulNumb
   return { kind: 'free-kick', team: fouled, x: p.x, y: p.y };
 }
 
-/** Run with ?selftest in the URL — logs the Phase 1 acceptance tests to the console. */
-function runPhase1SelfTests(): void {
+/** Run with ?selftest in the URL — logs the Phase 1 + Phase 2 pure-logic tests. */
+function runSelfTests(): void {
   const results: [string, boolean][] = [];
   const t = (name: string, ok: boolean) => results.push([name, ok]);
+  // ── Phase 1
   const a = decideOutOfPlay(450, 10, 'home');
-  t('Home last touch over touchline -> AWAY kick-in', a?.kind === 'kick-in' && a.team === 'away');
+  t('P1 Home last touch over touchline -> AWAY kick-in', a?.kind === 'kick-in' && a.team === 'away');
   const b = decideOutOfPlay(450, 510, 'away');
-  t('Away last touch over touchline -> HOME kick-in', b?.kind === 'kick-in' && b.team === 'home');
+  t('P1 Away last touch over touchline -> HOME kick-in', b?.kind === 'kick-in' && b.team === 'home');
   const c = decideOutOfPlay(10, 100, 'home');
-  t('Home defender last touch, own goal line -> AWAY corner (left, top)', c?.kind === 'corner' && c.team === 'away' && c.x < 100 && c.y < CENTER_Y);
+  t('P1 Home defender last touch, own goal line -> AWAY corner', c?.kind === 'corner' && c.team === 'away' && c.x < 100 && c.y < CENTER_Y);
   const d = decideOutOfPlay(10, 100, 'away');
-  t('Away attacker last touch, home goal line -> HOME GK clearance', d?.kind === 'goal-clearance' && d.team === 'home');
+  t('P1 Away attacker last touch, home goal line -> HOME GK clearance', d?.kind === 'goal-clearance' && d.team === 'home');
   const e = decideOutOfPlay(890, 400, 'away');
-  t('Away defender last touch, own goal line -> HOME corner (right, bottom)', e?.kind === 'corner' && e.team === 'home' && e.x > 800 && e.y > CENTER_Y);
+  t('P1 Away defender last touch, own goal line -> HOME corner', e?.kind === 'corner' && e.team === 'home' && e.x > 800 && e.y > CENTER_Y);
   const f = decideOutOfPlay(890, 400, 'home');
-  t('Home attacker last touch, away goal line -> AWAY GK clearance', f?.kind === 'goal-clearance' && f.team === 'away');
-  t('Ball in left goal mouth -> goal for AWAY', decideOutOfPlay(10, 260, 'home')?.team === 'away');
-  t('Ball in right goal mouth -> goal for HOME', decideOutOfPlay(890, 260, 'away')?.team === 'home');
-  t('Ball in play -> no decision', decideOutOfPlay(450, 260, 'home') === null);
+  t('P1 Home attacker last touch, away goal line -> AWAY GK clearance', f?.kind === 'goal-clearance' && f.team === 'away');
+  t('P1 Left goal mouth -> goal for AWAY', decideOutOfPlay(10, 260, 'home')?.team === 'away');
+  t('P1 Right goal mouth -> goal for HOME', decideOutOfPlay(890, 260, 'away')?.team === 'home');
+  t('P1 Ball in play -> no decision', decideOutOfPlay(450, 260, 'home') === null);
   const g = decideFoul('home', 500, 260, 1);
-  t('Home foul midfield -> AWAY free kick', g.kind === 'free-kick' && g.team === 'away');
+  t('P1 Home foul midfield -> AWAY free kick', g.kind === 'free-kick' && g.team === 'away');
   const h = decideFoul('home', 60, 260, 1);
-  t('Home foul in own box -> AWAY penalty', h.kind === 'penalty' && h.team === 'away' && h.x === PENALTY_SPOT_X);
+  t('P1 Home foul in own box -> AWAY penalty', h.kind === 'penalty' && h.team === 'away' && h.x === PENALTY_SPOT_X);
   const i = decideFoul('away', 800, 260, 1);
-  t('Away foul in own box -> HOME penalty', i.kind === 'penalty' && i.team === 'home' && i.x === FIELD_W - PENALTY_SPOT_X);
+  t('P1 Away foul in own box -> HOME penalty', i.kind === 'penalty' && i.team === 'home' && i.x === FIELD_W - PENALTY_SPOT_X);
   const j = decideFoul('home', 500, 260, 6);
-  t('6th accumulated foul -> 10m free kick to AWAY', j.kind === 'second-penalty' && j.team === 'away' && j.x === SECOND_SPOT_X);
-  const k = decideFoul('away', 400, 260, 3);
-  t('Away foul -> restart always for HOME (fouled team)', k.team === 'home');
+  t('P1 6th accumulated foul -> 10m free kick to AWAY', j.kind === 'second-penalty' && j.team === 'away' && j.x === SECOND_SPOT_X);
+  t('P1 Away foul -> restart for HOME', decideFoul('away', 400, 260, 3).team === 'home');
+  // ── Phase 2
+  t('P2 classify 0 -> idle', classifyLocomotion(0) === 'idle');
+  t('P2 classify 60 -> walk', classifyLocomotion(60) === 'walk');
+  t('P2 classify 190 (normal run) -> run', classifyLocomotion(190) === 'run');
+  t('P2 classify 260 (sprint) -> sprint', classifyLocomotion(260) === 'sprint');
+  const gi = gaitFor(0, { ...GAIT_TMP }), gw = gaitFor(70, { ...GAIT_TMP }),
+    gr = gaitFor(190, { ...GAIT_TMP }), gs = gaitFor(260, { ...GAIT_TMP });
+  t('P2 leg swing grows idle < walk < run < sprint', gi.legAmp === 0 && gw.legAmp > gi.legAmp && gr.legAmp > gw.legAmp && gs.legAmp > gr.legAmp);
+  t('P2 sprint leans more and has longer stride than run', gs.lean > gr.lean && gs.cycle > gr.cycle);
+  t('P2 sprint bends elbows more than run', gs.elbowIn > gr.elbowIn);
+  t('P2 shoot backswing is behind the body, strike is ahead',
+    keyframe(0.4, KF.shootFoot) < -10 && keyframe(0.6, KF.shootFoot) > 14);
+  t('P2 pass and shoot use different leg motion', keyframe(0.55, KF.passFoot) !== keyframe(0.55, KF.shootFoot));
+  t('P2 shoot swings farther than pass', keyframe(0.6, KF.shootFoot) > keyframe(0.55, KF.passFoot));
   const failed = results.filter((r) => !r[1]);
   results.forEach(([n, ok]) => console.log(`${ok ? '✅' : '❌'} ${n}`));
-  console.log(failed.length === 0 ? `PHASE 1 SELF-TEST: all ${results.length} passed` : `PHASE 1 SELF-TEST: ${failed.length} FAILED`);
+  console.log(failed.length === 0 ? `SELF-TEST: all ${results.length} passed` : `SELF-TEST: ${failed.length} FAILED`);
 }
 
 // ═══════════════ SCENE ═══════════════
@@ -206,7 +322,7 @@ class RetroKickScene extends Phaser.Scene {
   private ended = false;
   private kickoffLock = 0;
   private state: GameState = 'restart';
-  private goalScored = false; // prevents double-scoring
+  private goalScored = false;
   private message = 'Ready for kick-off';
   private openingKickoff: TeamSide = 'home';
 
@@ -219,6 +335,10 @@ class RetroKickScene extends Phaser.Scene {
   private goalTimer?: Phaser.Time.TimerEvent;
   private restartLabel!: Phaser.GameObjects.Text;
   private aimGfx!: Phaser.GameObjects.Graphics;
+
+  // Phase 2 state: the last shooter, so a failed shot can trigger a real "missed chance" reaction
+  private shooter: Footballer | null = null;
+  private shooterUntil = 0;
 
   private goalText!: Phaser.GameObjects.Text;
   private goalSubText!: Phaser.GameObjects.Text;
@@ -261,6 +381,15 @@ class RetroKickScene extends Phaser.Scene {
       this.setMessage(this.restart ? this.restart.baseMsg : 'Play on!');
     });
     document.getElementById('restart-button')?.addEventListener('click', () => this.resetMatch());
+
+    // Debug hook for inspecting animations: retroKickDebug.act(5, 'shoot')
+    if (new URLSearchParams(window.location.search).has('selftest')) {
+      (window as any).retroKickDebug = {
+        players: this.players,
+        act: (i: number, type: ActionType) => this.playAction(this.players[i], type, undefined, true),
+      };
+    }
+
     this.selectControlled();
     this.startKickoff(this.openingKickoff);
     this.updateHud();
@@ -301,7 +430,6 @@ class RetroKickScene extends Phaser.Scene {
     g.strokeRect(FIELD_W - 137, 135, 118, 250);
     g.strokeRect(FIELD_W - 68, 190, 49, 140);
 
-    // Penalty spots + futsal 10 m (second penalty) spots
     g.fillStyle(0xffffff, 1).fillCircle(PENALTY_SPOT_X, FIELD_H / 2, 3);
     g.fillStyle(0xffffff, 1).fillCircle(FIELD_W - PENALTY_SPOT_X, FIELD_H / 2, 3);
     g.fillStyle(0xffffff, 0.85).fillCircle(SECOND_SPOT_X, FIELD_H / 2, 3);
@@ -362,7 +490,6 @@ class RetroKickScene extends Phaser.Scene {
       })
       .setOrigin(0.5).setDepth(51).setAlpha(0);
 
-    // Restart UI: label + 4-second countdown above the ball, aim line + power bar
     this.restartLabel = this.add
       .text(0, 0, '', {
         fontFamily: 'Barlow Condensed, Arial Black, sans-serif', fontSize: '16px', color: '#ffd23f',
@@ -392,36 +519,28 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private addPlayer(side: TeamSide, x: number, y: number, role: Footballer['role'], number: number): void {
-    const isGK = role === 'GK';
-    const bodyColor = isGK ? (side === 'home' ? 0x9b59b6 : 0xff9800) : side === 'home' ? 0x2d7fff : 0xff3b47;
-    const shortsColor = isGK ? 0x333333 : side === 'home' ? 0x0a4fb5 : 0xb01822;
-    const skinColor = 0xf4c892;
-
+    const kit = makeKit(side, role, number);
     const container = this.add.container(x, y).setDepth(20);
     const shadow = this.add
-      .ellipse(x + 2, y + 10, isGK ? 22 : 20, isGK ? 10 : 9, 0x000000, 0.3)
+      .ellipse(x + 2, y + SHADOW_DY, role === 'GK' ? 24 : 22, 13, 0x000000, 0.3)
       .setDepth(15);
-
-    const shorts = this.add.rectangle(0, 6, isGK ? 14 : 12, 5, shortsColor).setOrigin(0.5);
-    const body = this.add.circle(0, 0, isGK ? 11 : 10, bodyColor, 1).setStrokeStyle(2, 0xffffff);
-    const head = this.add.circle(0, -8, 5, skinColor, 1).setStrokeStyle(1, 0x2a1810);
-    const hair = this.add.arc(0, -10, 5, 180, 360, false, 0x3a2418);
-
-    container.add([shorts, body, head, hair]);
-
+    const ring = this.add.circle(0, 0, 15).setStrokeStyle(2.5, 0xffd23f, 1).setFillStyle(0xffd23f, 0.12).setVisible(false);
+    const rig = this.add.graphics();
     const label = this.add
-      .text(0, 0, String(number), {
+      .text(0, -18, String(number), {
         fontFamily: 'Arial Black, sans-serif', fontSize: '9px', color: '#ffffff',
         stroke: '#000', strokeThickness: 2,
       })
       .setOrigin(0.5);
-    container.add(label);
+    container.add([ring, rig, label]);
 
     this.players.push({
-      sprite: container, body, head, shorts, shadow, label, side, role,
+      sprite: container, ring, rig, shadow, label, side, role,
       homeX: x, homeY: y, vx: 0, vy: 0, number, cooldown: 0,
-      celebrating: false, celebrateUntil: 0, tackling: 0,
+      celebrating: false, celebrateUntil: 0,
       facing: side === 'home' ? 0 : Math.PI,
+      kit, vis: side === 'home' ? 0 : Math.PI, stride: Math.random() * Math.PI * 2,
+      speed: 0, lastX: x, lastY: y, anim: 'idle', act: null,
     });
   }
 
@@ -429,6 +548,206 @@ class RetroKickScene extends Phaser.Scene {
     this.ballShadow = this.add.ellipse(FIELD_W / 2 + 2, FIELD_H / 2 + 6, 14, 6, 0x000000, 0.4).setDepth(12);
     this.ball = this.add.circle(FIELD_W / 2, FIELD_H / 2, 6, 0xffffff, 1).setStrokeStyle(1.5, 0x111111).setDepth(30);
     this.ballInner = this.add.circle(FIELD_W / 2, FIELD_H / 2, 2, 0x111111).setDepth(31);
+  }
+
+  // ═══════════════ PLAYER ANIMATION (Phase 2) ═══════════════
+
+  /** Start an action animation. fromStart = true plays the whole motion (used by the debug hook). */
+  private playAction(p: Footballer, type: ActionType, aim?: number, fromStart = false): void {
+    const def = ACTIONS[type];
+    p.act = { type, t: fromStart ? 0 : def.start, dur: def.dur, aim };
+  }
+
+  private animateAll(dt: number): void {
+    if (dt <= 0) return;
+    for (const p of this.players) this.animatePlayer(p, dt);
+  }
+
+  private animatePlayer(p: Footballer, dt: number): void {
+    const x = p.sprite.x;
+    const y = p.sprite.y;
+    const dx = x - p.lastX;
+    const dy = y - p.lastY;
+    p.lastX = x; p.lastY = y;
+
+    // Speed comes from real displacement. Teleports (restart snaps) are ignored.
+    let inst = Math.hypot(dx, dy) / dt;
+    if (inst > 420) inst = 0;
+    p.speed += (inst - p.speed) * Math.min(1, dt * 14);
+    const moving = p.speed > 25;
+
+    if (p.act) {
+      p.act.t += dt / p.act.dur;
+      if (p.act.t >= 1) p.act = null;
+    }
+
+    // Heading: action aim > celebration (face the crowd) > movement direction > the ball
+    let target: number;
+    if (p.act && p.act.aim !== undefined) target = p.act.aim;
+    else if (p.celebrating) target = Math.PI / 2;
+    else if (moving) target = Math.atan2(dy, dx);
+    else target = Math.atan2(this.ball.y - y, this.ball.x - x);
+
+    const maxTurn = (moving ? 12 : 9) * dt;
+    const diff = Phaser.Math.Angle.Wrap(target - p.vis);
+    p.vis = Phaser.Math.Angle.Wrap(p.vis + Phaser.Math.Clamp(diff, -maxTurn, maxTurn));
+    const remaining = Phaser.Math.Angle.Wrap(target - p.vis);
+
+    // Gait phase advances with distance travelled, so feet don't slide
+    const G = gaitFor(p.speed, GAIT_TMP);
+    p.stride += (p.speed * dt / G.cycle) * Math.PI * 2;
+
+    if (p.act) p.anim = p.act.type;
+    else if (p.celebrating) p.anim = 'celebrate';
+    else if (moving && Math.abs(remaining) > 0.7) p.anim = 'turn';
+    else p.anim = classifyLocomotion(p.speed);
+
+    this.drawPlayer(p, G, remaining, moving);
+    p.sprite.setDepth(20 + y / FIELD_H);
+  }
+
+  private drawPlayer(p: Footballer, G: Gait, rem: number, moving: boolean): void {
+    const g = p.rig;
+    g.clear();
+    const k = p.kit;
+    const now = this.time.now;
+    const a = p.act;
+    const t = a ? a.t : 0;
+
+    // ── Locomotion pose (local space: +x = facing, +y = right-hand side)
+    const ph = p.stride;
+    const sL = Math.sin(ph);
+    const sR = Math.sin(ph + Math.PI);
+    const liftAmt = Math.min(1, G.legAmp / 8);
+    let stance = G.stance;
+    let fLx = G.legAmp * sL;
+    let fRx = G.legAmp * sR;
+    let fLy = -stance;
+    let fRy = stance;
+    let liftL = Math.max(0, Math.cos(ph)) * liftAmt;
+    let liftR = Math.max(0, Math.cos(ph + Math.PI)) * liftAmt;
+    let hLx = G.armAmp * sR;                 // arms swing opposite to the same-side leg
+    let hRx = G.armAmp * sL;
+    let hLy = -(9.2 - G.elbowIn);
+    let hRy = 9.2 - G.elbowIn;
+    let lean = G.lean + Math.sin(now * 0.002 + p.number) * 0.25 * (1 - liftAmt);
+    let sx = 1;
+    let sy = 1;
+    let offX = 0;
+    let handR = k.longSleeves ? 2.9 : 2;
+    let elbowOut = 0;
+    let shadowS = 1;
+
+    // Goalkeeper ready stance when not otherwise busy
+    if (p.role === 'GK' && !a && !p.celebrating && p.speed < 95) {
+      stance = 5.5; fLy = -stance; fRy = stance;
+      hLx = 4; hRx = 4; hLy = -11.5; hRy = 11.5; lean = 1.2;
+    }
+
+    // Changing direction: arms counter-balance the turn
+    let headYaw = Phaser.Math.Clamp(rem * 0.8, -0.7, 0.7);
+    if (moving && !a) {
+      const out = Phaser.Math.Clamp(rem * 3, -2.5, 2.5);
+      hLy -= out; hRy -= out;
+    }
+
+    // ── Action poses (only present while a real action is in progress)
+    if (a) {
+      switch (a.type) {
+        case 'pass':
+          fRx = keyframe(t, KF.passFoot); fLx = 0; fLy = -4;
+          liftR = Math.abs(fRx) / 14; liftL = 0;
+          hLx = 2; hLy = -12.5; hRx = -3; hRy = 11; lean = 1;
+          break;
+        case 'shoot':
+          fRx = keyframe(t, KF.shootFoot); fLx = 0; fLy = -4.5;
+          liftR = Math.abs(fRx) / 12; liftL = 0;
+          hLx = -1; hLy = -14; hRx = -1; hRy = 14;
+          lean = keyframe(t, KF.shootLean);
+          sx = sy = 1 + 0.05 * Math.sin(Math.PI * t);
+          break;
+        case 'throw': {
+          const hx = keyframe(t, KF.throwHand);
+          hRx = hx; hRy = 10 - Math.max(0, hx) * 0.3;
+          hLx = 3; hLy = -10;
+          lean = keyframe(t, KF.throwLean);
+          stance = 5; fLy = -5; fRy = 5; fLx = -1; fRx = 1;
+          liftL = 0; liftR = 0;
+          break;
+        }
+        case 'tackle':
+          offX = keyframe(t, KF.tackleSlide);
+          fRx = 15; fRy = 2; fLx = -7; fLy = -3; liftR = 0.2; liftL = 0.4;
+          hLx = -6; hLy = -9.5; hRx = -6; hRy = 9.5;
+          lean = 2; sx = 1.1; sy = 0.92;
+          break;
+        case 'jump': {
+          const s = Math.sin(Math.PI * t);
+          sx = sy = 1 + 0.22 * s;
+          fLx = -2; fRx = -2; fLy = -2.5; fRy = 2.5; liftL = 0.6; liftR = 0.6;
+          hLx = 4; hLy = -8.5; hRx = 4; hRy = 8.5; handR = 2.8;
+          shadowS = 1 - 0.3 * s;
+          break;
+        }
+        case 'miss':
+          hLx = 1.5; hLy = -4.5; hRx = 1.5; hRy = 4.5; elbowOut = 3.5;
+          lean = -1.2; headYaw = 0; stance = 4; fLy = -stance; fRy = stance;
+          break;
+      }
+    } else if (p.celebrating) {
+      const w = now * 0.02 + p.number;
+      hLx = 3 + 2 * Math.sin(w); hRx = 3 + 2 * Math.sin(w + Math.PI);
+      hLy = -11.5; hRy = 11.5; handR = 2.6; elbowOut = 1.5;
+      fLx = 3 * Math.sin(w); fRx = -3 * Math.sin(w);
+      liftL = 0.3; liftR = 0.3;
+      sx = sy = 1 + 0.12 * Math.abs(Math.sin(now * 0.011 + p.number * 0.7));
+      headYaw = 0;
+    }
+
+    // Keep limbs within anatomical reach (prevents overlap / detached limbs)
+    fLx = Phaser.Math.Clamp(fLx, -16, 17); fRx = Phaser.Math.Clamp(fRx, -16, 17);
+    hLx = Phaser.Math.Clamp(hLx, -13, 14); hRx = Phaser.Math.Clamp(hRx, -13, 14);
+    hLy = Phaser.Math.Clamp(hLy, -15, -3); hRy = Phaser.Math.Clamp(hRy, 3, 15);
+
+    // ── Draw: legs → hips → torso → arms → head
+    const leg = (hipY: number, fx: number, fy: number, lf: number, sd: number): void => {
+      const kx = fx * 0.5;
+      const ky = hipY + (fy - hipY) * 0.5 + sd * lf * 1.2;
+      g.lineStyle(4.4, k.shorts, 1).lineBetween(0, hipY, kx, ky);          // thigh
+      g.lineStyle(3.4, k.socks, 1).lineBetween(kx, ky, fx, fy);            // shin
+      g.fillStyle(k.boots, 1).fillEllipse(fx + 1, fy, 5.6 * (1 + lf * 0.15), 3.3);  // boot
+    };
+    leg(-3, fLx, fLy, liftL, -1);
+    leg(3, fRx, fRy, liftR, 1);
+
+    g.fillStyle(k.shorts, 1).fillEllipse(-1, 0, 7, 9);
+
+    const tx = lean * 0.5;
+    g.fillStyle(k.jersey, 1).fillEllipse(tx, 0, 9.5, 15.5);
+    g.lineStyle(1.4, k.jerseyDark, 1).strokeEllipse(tx, 0, 9.5, 15.5);
+
+    const arm = (sd: number, hx: number, hy: number): void => {
+      const spx = tx + 0.5;
+      const spy = sd * 6.4;
+      const ex = (spx + hx) * 0.45;
+      const ey = sd * (6.8 + Math.max(0, Math.abs(hy) - 6.8) * 0.5 + elbowOut);
+      g.lineStyle(3.4, k.jersey, 1).lineBetween(spx, spy, ex, ey);                          // upper arm (sleeve)
+      g.lineStyle(2.6, k.longSleeves ? k.jersey : k.skin, 1).lineBetween(ex, ey, hx, hy);   // forearm
+      g.fillStyle(k.glove, 1).fillCircle(hx, hy, handR);                                    // hand / glove
+    };
+    arm(-1, hLx, hLy);
+    arm(1, hRx, hRy);
+
+    const hy = Math.sin(headYaw) * 2;
+    g.fillStyle(k.hair, 1).fillCircle(tx + 0.2, hy * 0.5, 4.9);          // hair (back of head)
+    g.fillStyle(k.skin, 1).fillCircle(tx + 1.8, hy, 4.0);                // face
+    g.fillStyle(k.skinShade, 1).fillCircle(tx + 5.4, hy * 1.1, 1.25);    // nose — shows facing direction
+
+    // ── Orientation and scale of the whole rig
+    g.setRotation(p.vis);
+    g.setScale(sx, sy);
+    g.setPosition(Math.cos(p.vis) * offX, Math.sin(p.vis) * offX);
+    p.shadow.setScale(shadowS);
   }
 
   // ═══════════════ UPDATE LOOP ═══════════════
@@ -445,7 +764,6 @@ class RetroKickScene extends Phaser.Scene {
 
     const dt = Math.min(delta / 1000, 0.035);
 
-    // Futsal stopped time: the clock only runs while the ball is live.
     if (this.state === 'playing') {
       this.clockAcc += dt;
       if (this.clockAcc >= 1) {
@@ -473,10 +791,10 @@ class RetroKickScene extends Phaser.Scene {
         this.updatePossession();
       }
     }
-    // 'goal' and 'fulltime' only animate
     this.updateParticles(dt);
     this.updateCamera(dt);
     this.syncBallVisuals();
+    this.animateAll(dt);
   }
 
   private syncBallVisuals(): void {
@@ -587,15 +905,14 @@ class RetroKickScene extends Phaser.Scene {
         const ballSpeed = Math.hypot(this.ballVx, this.ballVy);
         if (d < 23 && this.possession !== 'away' && p.cooldown <= 0 && !this.gkHolder) {
           if (this.possession === 'home') {
-            // One challenge attempt per 0.4 s. The CPU follows the same foul rules as the human.
             p.cooldown = 0.4;
+            this.playAction(p, 'tackle', Math.atan2(this.ball.y - p.sprite.y, this.ball.x - p.sprite.x));
             const roll = Phaser.Math.Between(0, 100);
             if (roll < 10) {
               this.awardFoul('away', this.ball.x, this.ball.y);
               return;
             }
             if (roll < 55) {
-              p.tackling = 0.3;
               this.playSound('tackle');
               this.controlBall(p);
               this.spawnDustParticles(this.ball.x, this.ball.y);
@@ -618,13 +935,13 @@ class RetroKickScene extends Phaser.Scene {
       if (d < 27) {
         if (this.ball.x < 300 && Math.abs(this.ball.y - FIELD_H / 2) < 175 && Phaser.Math.Between(0, 100) < 4) {
           const angle = Math.atan2(FIELD_H / 2 - this.ball.y, 18 - this.ball.x);
-          this.kickBall(Math.cos(angle) * 340, Math.sin(angle) * 340, carrier, 40);
+          this.kickBall(Math.cos(angle) * 340, Math.sin(angle) * 340, carrier, 40, 'shoot');
           this.playSound('shoot');
           this.setMessage('Shot from Comets!');
         } else if (Phaser.Math.Between(0, 100) < 2) {
           const teammate = awayPlayers.find((p) => p !== carrier && p.role !== 'GK');
           if (teammate) {
-            this.kickBall((teammate.sprite.x - this.ball.x) * 1.7, (teammate.sprite.y - this.ball.y) * 1.7, carrier, 15);
+            this.kickBall((teammate.sprite.x - this.ball.x) * 1.7, (teammate.sprite.y - this.ball.y) * 1.7, carrier, 15, 'pass');
           }
         } else {
           this.ballVx = Math.max(-140, this.ballVx - 8);
@@ -640,22 +957,7 @@ class RetroKickScene extends Phaser.Scene {
     const newX = Phaser.Math.Clamp(p.sprite.x + p.vx * dt, 31, FIELD_W - 31);
     const newY = Phaser.Math.Clamp(p.sprite.y + p.vy * dt, 31, FIELD_H - 31);
     p.sprite.setPosition(newX, newY);
-    p.shadow.setPosition(newX + 2, newY + 10);
-
-    if (p.tackling > 0) {
-      p.tackling -= dt;
-      p.sprite.setRotation(p.facing + Math.PI / 4);
-      p.sprite.setScale(1.1, 0.9);
-    } else if (p.celebrating) {
-      const bounce = Math.sin(this.time.now * 0.015) * 2;
-      p.sprite.setY(newY + bounce);
-    } else {
-      p.sprite.setRotation(0);
-      p.sprite.setScale(1, 1);
-      if (Math.abs(p.vx) > 5 || Math.abs(p.vy) > 5) {
-        p.sprite.setY(newY + Math.sin(this.time.now * 0.02) * 0.4);
-      }
-    }
+    p.shadow.setPosition(newX + 2, newY + SHADOW_DY);
 
     if (
       userControlled && this.possession === 'home' && this.state === 'playing' &&
@@ -690,7 +992,6 @@ class RetroKickScene extends Phaser.Scene {
   // ═══════════════ BALL PHYSICS & TOUCH TRACKING ═══════════════
 
   private updateBall(dt: number): void {
-    // Keeper holding the ball: pin it to his hands
     if (this.gkHolder) {
       const gk = this.gkHolder;
       this.ball.setPosition(gk.sprite.x + (gk.side === 'home' ? 10 : -10), gk.sprite.y);
@@ -721,7 +1022,6 @@ class RetroKickScene extends Phaser.Scene {
     this.handleBallContacts();
   }
 
-  /** Single entry point for out-of-play decisions (uses the pure rule function). */
   private checkBoundaries(): boolean {
     if (this.state !== 'playing' || this.goalScored || this.kickoffLock > 0) return false;
     const decision = decideOutOfPlay(this.ball.x, this.ball.y, this.lastTouch);
@@ -730,15 +1030,16 @@ class RetroKickScene extends Phaser.Scene {
     if (decision.kind === 'goal') {
       this.scoreGoal(decision.team);
     } else {
+      this.shotMissed();                               // a shot that ends out of play is a missed chance
       this.startRestart({ kind: decision.kind, team: decision.team, x: decision.x, y: decision.y });
     }
     return true;
   }
 
-  /** Every touch of the ball goes through here: keeps last-touch accurate and clears indirect restrictions. */
   private registerTouch(p: Footballer): void {
     this.lastTouch = p.side;
     if (this.indirectPending && p !== this.indirectPending.taker) this.indirectPending = null;
+    if (this.shooter && p.side === this.shooter.side && p !== this.shooter) this.shooter = null;
   }
 
   private controlBall(p: Footballer): void {
@@ -761,22 +1062,28 @@ class RetroKickScene extends Phaser.Scene {
     }
     if (!best) return;
 
+    // A real aerial contact (ball off the ground) makes the player jump for it
+    if (this.ballHeight > 2.5 && !best.act) this.playAction(best, 'jump');
+
     const speed = Math.hypot(this.ballVx, this.ballVy);
     const own = best.side === this.lastTouch;
     if (best.role === 'GK' && !own && speed > 150) {
-      if (speed <= 300) { this.registerTouch(best); this.possession = best.side; this.gkCatch(best); }
+      if (speed <= 300) { this.shotMissed(); this.registerTouch(best); this.possession = best.side; this.gkCatch(best); }
       else this.deflect(best, speed, 0.35, true);
     } else if (own || speed < 150) {
-      this.controlBall(best);                      // trap / receive a pass / loose ball
+      if (!own) this.shotMissed();
+      this.controlBall(best);
     } else if (speed < 260) {
-      this.controlBall(best);                      // interception of a pass
+      this.shotMissed();
+      this.controlBall(best);
       this.setMessage(`Intercepted by ${teamName(best.side)}`);
     } else {
-      this.deflect(best, speed, 0.5, false);       // block / deflection
+      this.deflect(best, speed, 0.5, false);
     }
   }
 
   private deflect(p: Footballer, speed: number, keep: number, save: boolean): void {
+    this.shotMissed();                                  // deflect() is only used by opponents of the last toucher
     const ang = Math.atan2(this.ball.y - p.sprite.y, this.ball.x - p.sprite.x);
     let nx = Math.cos(ang) * 0.7 + (this.ballVx / speed) * 0.3;
     let ny = Math.sin(ang) * 0.7 + (this.ballVy / speed) * 0.3;
@@ -795,7 +1102,15 @@ class RetroKickScene extends Phaser.Scene {
     this.setMessage(save ? '🧤 Parried!' : 'Blocked!');
   }
 
-  // ─── Goalkeeper possession (4-second rule: keeper must release the ball) ───
+  /** The last shooter reacts only if the shot really ended without a goal. */
+  private shotMissed(): void {
+    const s = this.shooter;
+    if (!s) return;
+    this.shooter = null;
+    if (this.time.now > this.shooterUntil) return;
+    this.playAction(s, 'miss');
+  }
+
   private gkCatch(gk: Footballer): void {
     this.gkHolder = gk;
     this.gkHoldTimer = 1.0 + Math.random() * 0.8;
@@ -817,7 +1132,7 @@ class RetroKickScene extends Phaser.Scene {
     const speed = Phaser.Math.Clamp(d * 1.3, 170, 380);
     const ang = Math.atan2(ty - gk.sprite.y, tx - gk.sprite.x);
     this.gkHolder = null;
-    this.kickBall(Math.cos(ang) * speed, Math.sin(ang) * speed, gk, 25);
+    this.kickBall(Math.cos(ang) * speed, Math.sin(ang) * speed, gk, 25, 'throw');
     gk.cooldown = 1.0;
     this.playSound('pass');
     this.setMessage(`${teamName(gk.side)} keeper distributes`);
@@ -837,7 +1152,6 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  /** Best-placed teammate (forward, unmarked, in range). Used by CPU restarts and keeper distribution. */
   private findOpenTeammate(side: TeamSide, fromX: number, fromY: number, exclude?: Footballer): Footballer | null {
     const dirA = side === 'home' ? 1 : -1;
     const foes = this.players.filter((p) => p.side !== side && p.role !== 'GK');
@@ -866,7 +1180,7 @@ class RetroKickScene extends Phaser.Scene {
     const teammate = teammates[0];
     if (!teammate) return;
     const angle = Math.atan2(teammate.sprite.y - this.ball.y, teammate.sprite.x - this.ball.x);
-    this.kickBall(Math.cos(angle) * 260, Math.sin(angle) * 260, this.controlled, 10);
+    this.kickBall(Math.cos(angle) * 260, Math.sin(angle) * 260, this.controlled, 10, 'pass');
     this.playSound('pass');
     this.setMessage('→ Pass played');
   }
@@ -881,7 +1195,7 @@ class RetroKickScene extends Phaser.Scene {
     const targetY = FIELD_H / 2 + Phaser.Math.Between(-30, 30);
     const angle = Math.atan2(targetY - this.ball.y, FIELD_W - 8 - this.ball.x);
     const power = this.ball.x > FIELD_W * 0.65 ? 430 : 350;
-    this.kickBall(Math.cos(angle) * power, Math.sin(angle) * power, this.controlled, 50);
+    this.kickBall(Math.cos(angle) * power, Math.sin(angle) * power, this.controlled, 50, 'shoot');
     this.playSound('shoot');
     this.setMessage('💥 SHOT!');
     this.cameraShake = 0.12;
@@ -889,16 +1203,18 @@ class RetroKickScene extends Phaser.Scene {
 
   private tackle(): void {
     if (this.gkHolder) { this.setMessage('Keeper has the ball'); return; }
-    this.controlled.tackling = 0.3;
-    const opponent = this.nearestPlayer('away', this.controlled.sprite.x, this.controlled.sprite.y);
-    const d = dist(this.controlled.sprite.x, this.controlled.sprite.y, opponent.sprite.x, opponent.sprite.y);
-    const ballDist = dist(this.controlled.sprite.x, this.controlled.sprite.y, this.ball.x, this.ball.y);
+    const me = this.controlled;
+    const opponent = this.nearestPlayer('away', me.sprite.x, me.sprite.y);
+    const d = dist(me.sprite.x, me.sprite.y, opponent.sprite.x, opponent.sprite.y);
+    const ballDist = dist(me.sprite.x, me.sprite.y, this.ball.x, this.ball.y);
 
+    const aim = ballDist < 90 ? Math.atan2(this.ball.y - me.sprite.y, this.ball.x - me.sprite.x) : me.facing;
+    this.playAction(me, 'tackle', aim);
     this.playSound('tackle');
-    this.spawnDustParticles(this.controlled.sprite.x, this.controlled.sprite.y + 8);
+    this.spawnDustParticles(me.sprite.x, me.sprite.y + 8);
 
     if (ballDist < 35 && this.possession === 'away') {
-      this.registerTouch(this.controlled);
+      this.registerTouch(me);
       this.possession = 'home';
       this.selectControlled();
       this.ballVx *= -0.3;
@@ -906,7 +1222,7 @@ class RetroKickScene extends Phaser.Scene {
       this.setMessage('✓ Clean tackle!');
     } else if (d < 37) {
       if (Phaser.Math.Between(0, 100) < 35) {
-        this.awardFoul('home', opponent.sprite.x, opponent.sprite.y);   // fouled team = away
+        this.awardFoul('home', opponent.sprite.x, opponent.sprite.y);
       } else {
         this.setMessage('Challenge missed!');
       }
@@ -915,7 +1231,8 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  private kickBall(vx: number, vy: number, kicker: Footballer, lift = 10): void {
+  /** Single choke point for every kick. `action` plays the matching animation on the kicker. */
+  private kickBall(vx: number, vy: number, kicker: Footballer, lift = 10, action?: ActionType): void {
     this.gkHolder = null;
     this.ballVx = vx;
     this.ballVy = vy;
@@ -923,6 +1240,8 @@ class RetroKickScene extends Phaser.Scene {
     this.possession = null;
     this.registerTouch(kicker);
     kicker.cooldown = 0.25;
+    if (action) this.playAction(kicker, action, Math.atan2(vy, vx));
+    if (action === 'shoot') { this.shooter = kicker; this.shooterUntil = this.time.now + 3000; }
   }
 
   // ═══════════════ FOULS ═══════════════
@@ -941,8 +1260,7 @@ class RetroKickScene extends Phaser.Scene {
 
   private startKickoff(team: TeamSide): void {
     this.players.forEach((p) => {
-      p.vx = 0; p.vy = 0; p.celebrating = false; p.tackling = 0; p.cooldown = 0;
-      p.sprite.setRotation(0).setScale(1, 1);
+      p.vx = 0; p.vy = 0; p.celebrating = false; p.act = null; p.cooldown = 0;
     });
     this.kickoffLock = 0;
     this.goalScored = false;
@@ -954,6 +1272,7 @@ class RetroKickScene extends Phaser.Scene {
     this.state = 'restart';
     this.gkHolder = null;
     this.indirectPending = null;
+    this.shooter = null;
     this.possession = spec.team;
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
     this.ball.setPosition(spec.x, spec.y);
@@ -995,14 +1314,14 @@ class RetroKickScene extends Phaser.Scene {
       case 'kick-in': return { x: r.x, y: r.y < CENTER_Y ? 31 : FIELD_H - 31 };
       case 'corner': return { x: r.x < CENTER_X ? 31 : FIELD_W - 31, y: r.y < CENTER_Y ? 31 : FIELD_H - 31 };
       case 'goal-clearance': return { x: r.x - dirA * 12, y: r.y };
-      default: return { x: r.x - dirA * 13, y: r.y };   // behind the ball, facing the goal being attacked
+      default: return { x: r.x - dirA * 13, y: r.y };
     }
   }
 
   private defaultAim(r: RestartSpec): number {
     const dirA = r.team === 'home' ? 1 : -1;
     const goalX = dirA === 1 ? FIELD_W - 8 : 8;
-    let tx = goalX; let ty = CENTER_Y;
+    let tx = goalX; const ty = CENTER_Y;
     switch (r.kind) {
       case 'kickoff': tx = CENTER_X + dirA * 100; break;
       case 'kick-in': tx = CENTER_X + dirA * 60; break;
@@ -1047,7 +1366,6 @@ class RetroKickScene extends Phaser.Scene {
     return raw.map((p) => clampPt(p.x, p.y));
   }
 
-  /** Futsal restart restrictions on the defending team's positions. */
   private applyRestartLimits(r: RestartSpec, t: Pt): Pt {
     const dirA = r.team === 'home' ? 1 : -1;
     let out = { ...t };
@@ -1058,11 +1376,10 @@ class RetroKickScene extends Phaser.Scene {
       return clampPt(out.x, out.y);
     }
     if (r.kind === 'goal-clearance') {
-      // opponents stay outside the clearing team's penalty area
       out.x = r.team === 'home' ? Math.max(out.x, BOX_DEPTH + 25) : Math.min(out.x, FIELD_W - BOX_DEPTH - 25);
       return clampPt(out.x, out.y);
     }
-    const minDist = 110;                                   // ~5 m
+    const minDist = 110;
     const dx = out.x - r.x; const dy = out.y - r.y;
     const d = Math.hypot(dx, dy);
     if (d < minDist) {
@@ -1087,7 +1404,6 @@ class RetroKickScene extends Phaser.Scene {
 
     const field = others.filter((p) => p.role !== 'GK');
     if (penaltyLike) {
-      // everyone except taker and keepers stands behind the ball (and outside the area)
       field.forEach((p, i) => r.targets.set(p, clampPt(r.x - dirA * (75 + Math.floor(i / 6) * 28), 90 + (i % 6) * 68)));
       return;
     }
@@ -1105,7 +1421,7 @@ class RetroKickScene extends Phaser.Scene {
       const t = r.targets.get(p);
       if (!t) return;
       p.sprite.setPosition(t.x, t.y);
-      p.shadow.setPosition(t.x + 2, t.y + 10);
+      p.shadow.setPosition(t.x + 2, t.y + SHADOW_DY);
       p.vx = 0; p.vy = 0;
     });
   }
@@ -1115,11 +1431,9 @@ class RetroKickScene extends Phaser.Scene {
     if (!r) { this.state = 'playing'; return; }
     r.elapsed += dt;
 
-    // hold the ball on its spot
     this.ball.setPosition(r.x, r.y);
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
 
-    // players walk to their positions
     let settled = true;
     this.players.forEach((p) => {
       const t = r.targets.get(p);
@@ -1131,7 +1445,7 @@ class RetroKickScene extends Phaser.Scene {
     if (!r.ready) {
       if (settled || r.elapsed > 2.4) {
         r.ready = true;
-        this.snapToLayout(r);          // guarantees the distance/position rules at the moment of the restart
+        this.snapToLayout(r);
       } else {
         this.updateRestartLabel(r);
         return;
@@ -1146,11 +1460,11 @@ class RetroKickScene extends Phaser.Scene {
       r.cpuDelay -= dt;
       if (r.cpuDelay <= 0) this.cpuTakeRestart(r);
     }
-    if (this.restart !== r) return;     // restart was taken or replaced this frame
+    if (this.restart !== r) return;
 
     if (r.timer <= 0) {
       if (info.limit !== null) this.fourSecondViolation(r);
-      else this.takeRestart(r, r.aim, r.charging ? r.power : 0.7);   // kick-off / penalty auto-take
+      else this.takeRestart(r, r.aim, r.charging ? r.power : 0.7);
       return;
     }
     this.updateRestartLabel(r);
@@ -1211,12 +1525,11 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private takeRestart(r: Restart, aim: number, power: number): void {
-    if (this.restart !== r) return;                    // prevents duplicate triggers
+    if (this.restart !== r) return;
     const info = RESTART_INFO[r.kind];
     const speed = info.min + (info.max - info.min) * Phaser.Math.Clamp(power, 0, 1);
     let vx = Math.cos(aim) * speed;
     let vy = Math.sin(aim) * speed;
-    // kick-ins and corners must be played into the field
     if (r.kind === 'kick-in') {
       if (r.y < CENTER_Y && vy < 0) vy = -vy;
       if (r.y > CENTER_Y && vy > 0) vy = -vy;
@@ -1228,14 +1541,20 @@ class RetroKickScene extends Phaser.Scene {
       if (r.y > CENTER_Y && vy > 0) vy = -vy;
     }
 
+    // Which animation the taker performs follows what the restart actually is
+    let action: ActionType = 'pass';
+    if (r.kind === 'goal-clearance') action = 'throw';
+    else if (r.kind === 'penalty' || r.kind === 'second-penalty') action = 'shoot';
+    else if ((r.kind === 'corner' || r.kind === 'free-kick') && power > 0.6) action = 'shoot';
+
     this.restart = null;
     this.state = 'playing';
     this.kickoffLock = 0.25;
     this.restartLabel.setText('');
     this.aimGfx.clear();
 
-    this.kickBall(vx, vy, r.taker, info.lift);
-    r.taker.cooldown = 1.0;                            // taker may not touch it again until it has been played
+    this.kickBall(vx, vy, r.taker, info.lift, action);
+    r.taker.cooldown = 1.0;
     this.indirectPending = info.indirect ? { team: r.team, taker: r.taker } : null;
 
     if (r.kind === 'penalty' || r.kind === 'second-penalty') { this.playSound('shoot'); this.cameraShake = 0.2; }
@@ -1244,7 +1563,6 @@ class RetroKickScene extends Phaser.Scene {
     this.setMessage(`${info.label} taken — play on!`);
   }
 
-  /** Four-second rule: the restart goes to the opponents in the futsal-correct form. */
   private fourSecondViolation(r: Restart): void {
     const opp = other(r.team);
     let spec: RestartSpec;
@@ -1272,10 +1590,10 @@ class RetroKickScene extends Phaser.Scene {
   private scoreGoal(side: TeamSide): void {
     if (this.goalScored) return;
 
-    // A goal cannot be scored directly from an indirect restart (kick-in, clearance, indirect FK).
     if (this.indirectPending) {
       const pend = this.indirectPending;
       this.indirectPending = null;
+      this.shotMissed();
       if (side === pend.team) {
         this.startRestart(clearanceSpec(other(side)));
         this.setMessage('No goal — direct from an indirect restart · ' + this.restart!.baseMsg);
@@ -1287,6 +1605,7 @@ class RetroKickScene extends Phaser.Scene {
     }
 
     this.goalScored = true;
+    this.shooter = null;
     if (side === 'home') this.homeScore++; else this.awayScore++;
 
     this.state = 'goal';
@@ -1307,12 +1626,15 @@ class RetroKickScene extends Phaser.Scene {
     const confettiX = side === 'home' ? FIELD_W * 0.75 : FIELD_W * 0.25;
     for (let i = 0; i < 50; i++) this.spawnConfetti(confettiX, FIELD_H / 2);
 
+    // Scoring team celebrates (pose + hop are drawn by the rig; positions are untouched)
     const now = this.time.now;
-    this.players.filter((p) => p.side === side).forEach((p) => {
-      p.celebrating = true;
-      p.celebrateUntil = now + 2500;
+    this.players.forEach((p) => {
       p.vx = 0; p.vy = 0;
-      this.tweens.add({ targets: p.sprite, y: p.sprite.y - 12, yoyo: true, repeat: 4, duration: 180, ease: 'Sine.easeInOut' });
+      if (p.side === side) {
+        p.celebrating = true;
+        p.celebrateUntil = now + 2500;
+        p.act = null;
+      }
     });
 
     this.setMessage(`⚽ GOAL! ${teamName(side)} score!`);
@@ -1322,8 +1644,8 @@ class RetroKickScene extends Phaser.Scene {
       this.players.forEach((p) => { p.celebrating = false; });
       this.goalText.setAlpha(0);
       this.goalSubText.setAlpha(0);
-      if (this.half === 3) { this.endMatch(); return; }     // golden goal in extra time
-      this.startKickoff(other(side));                        // the team that conceded restarts
+      if (this.half === 3) { this.endMatch(); return; }
+      this.startKickoff(other(side));
     });
   }
 
@@ -1440,6 +1762,7 @@ class RetroKickScene extends Phaser.Scene {
     this.restart = null;
     this.indirectPending = null;
     this.gkHolder = null;
+    this.shooter = null;
     this.foulCount = { home: 0, away: 0 };
     if (this.hint) this.hint.style.display = 'none';
     this.startKickoff(this.openingKickoff);
@@ -1453,9 +1776,7 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private refreshMarker(): void {
-    this.players.filter((p) => p.side === 'home').forEach((p) => {
-      p.body.setStrokeStyle(p === this.controlled ? 3 : 2, p === this.controlled ? 0xffd23f : 0xffffff);
-    });
+    this.players.forEach((p) => p.ring.setVisible(p === this.controlled));
   }
 
   private nearestPlayer(side: TeamSide, x: number, y: number): Footballer {
@@ -1489,7 +1810,7 @@ class RetroKickScene extends Phaser.Scene {
 
 // ═══════════════ BOOT ═══════════════
 
-if (new URLSearchParams(window.location.search).has('selftest')) runPhase1SelfTests();
+if (new URLSearchParams(window.location.search).has('selftest')) runSelfTests();
 
 const game = new Phaser.Game({
   type: Phaser.AUTO,
