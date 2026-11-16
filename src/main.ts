@@ -31,6 +31,11 @@ const Z_WIN = 11;
 const BODY_R = 11;
 const GK_PREDICT_ERR = 6;
 
+// Ball physics (Phase 5)
+const G = 400;                   // gravity (px/s²)
+const MAGNUS = 0.6;              // curl strength
+const POST_R = 9;                // post radius + ball radius
+
 type TeamSide = 'home' | 'away';
 type GameState = 'playing' | 'restart' | 'goal' | 'fulltime';
 type RestartKind =
@@ -45,6 +50,7 @@ type AnimName =
   | 'catch' | 'parry' | 'fall' | 'recover' | 'concede';
 type Tactic = 'balanced' | 'press' | 'defensive' | 'counter' | 'possession';
 type Phase = 'attack' | 'defend' | 'loose';
+type BallEvent = 'none' | 'bounce' | 'post' | 'bar';
 
 interface Pt { x: number; y: number }
 interface Sample { t: number; x: number; y: number; z: number }
@@ -52,6 +58,8 @@ interface Order { x: number; y: number; speed: number }
 interface Slot { x: number; y: number; role: 'GK' | 'DEF' | 'MID' | 'FWD' }
 interface RestartSpec { kind: RestartKind; team: TeamSide; x: number; y: number }
 interface OutOfPlay { kind: 'goal' | 'kick-in' | 'corner' | 'goal-clearance'; team: TeamSide; x: number; y: number }
+interface BallState { x: number; y: number; z: number; vx: number; vy: number; vz: number; curl: number; vspin: number }
+interface SpinSpec { curl?: number; vspin?: number }
 
 interface Kit {
   jersey: number; jerseyDark: number; shorts: number; socks: number; boots: number;
@@ -151,24 +159,23 @@ const RESTART_INFO: Record<RestartKind, {
 };
 
 // ═══════════════ TACTICS (Phase 4) ═══════════════
-// Every number below is read by the AI and changes how the team actually plays.
 interface TacticParams {
   label: string;
-  lineShift: number;     // how far up (+) / down (-) the whole team sits, in px
-  pressRadius: number;   // a defender closes the ball down inside this distance
-  pressers: number;      // players that close down the ball carrier
-  width: number;         // spread across the pitch
-  support: number;       // distance of support players from the carrier
-  forwardRuns: number;   // chance a forward makes a run in behind (0..1)
-  shootRange: number;    // max shooting distance
-  shootThr: number;      // minimum shot quality to shoot
-  riskPass: number;      // appetite for forward / risky passes (0..1)
-  holdTime: number;      // seconds the carrier holds the ball when not pressed
-  tempo: number;         // movement speed multiplier
-  oneTwo: number;        // chance to play a one-two after a short pass
-  shortBias: number;     // preference for short passes
-  markDist: number;      // how tight defenders mark
-  counterMs: number;     // length of the fast-break window after winning the ball
+  lineShift: number;
+  pressRadius: number;
+  pressers: number;
+  width: number;
+  support: number;
+  forwardRuns: number;
+  shootRange: number;
+  shootThr: number;
+  riskPass: number;
+  holdTime: number;
+  tempo: number;
+  oneTwo: number;
+  shortBias: number;
+  markDist: number;
+  counterMs: number;
 }
 
 const TACTICS: Record<Tactic, TacticParams> = {
@@ -205,7 +212,7 @@ const GAIT_TABLE: number[][] = [
   [70,  4.5,  3.5, 0,   0.5, 34, 3.6],
   [150, 7.5,  6.0, 1.5, 2.0, 46, 3.2],
   [200, 8.5,  7.0, 2.2, 2.8, 50, 3.0],
-  [260, 9.5, 8.5, 3.6, 3.8, 56, 2.6],
+  [260, 10.5, 8.5, 3.6, 3.8, 56, 2.8],
 ];
 const GAIT_TMP: Gait = { legAmp: 0, armAmp: 0, lean: 0, elbowIn: 0, cycle: 40, stance: 4 };
 
@@ -330,6 +337,198 @@ function decideFoul(fouler: TeamSide, victimX: number, victimY: number, foulNumb
   return { kind: 'free-kick', team: fouled, x: p.x, y: p.y };
 }
 
+// ═══════════════ PURE BALL PHYSICS (Phase 5) ═══════════════
+
+let LAST_IMPACT = 0;   // vertical speed of the most recent bounce (for sound)
+
+/** Geometry helper: distance from p to segment a–b and where along it (t in 0..1). */
+function distToSegment(p: Pt, a: Pt, b: Pt): { d: number; t: number } {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const len2 = abx * abx + aby * aby;
+  if (len2 < 1e-6) return { d: Math.hypot(p.x - a.x, p.y - a.y), t: 0 };
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2));
+  return { d: Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t)), t };
+}
+
+/** Bounce a velocity off a surface with unit normal n: e = restitution, tf = tangential speed kept. */
+function reflect(vx: number, vy: number, nx: number, ny: number, e: number, tf: number): Pt {
+  const vn = vx * nx + vy * ny;
+  if (vn >= 0) return { x: vx, y: vy };
+  const tx = vx - vn * nx;
+  const ty = vy - vn * ny;
+  return { x: tx * tf - e * vn * nx, y: ty * tf - e * vn * ny };
+}
+
+/** Posts (vertical poles) and crossbar of both goals. Swept test, so fast shots cannot tunnel. */
+function collideGoal(s: BallState, x0: number, y0: number, z0: number): BallEvent {
+  for (const gl of [LINE, FIELD_W - LINE]) {
+    const sideIn = gl === LINE ? 1 : -1;                         // direction pointing into the field
+    // Crossbar: the ball crosses the goal-line plane at bar height
+    const cameFromField = (x0 - gl) * sideIn > 0;
+    if (cameFromField && (s.x - gl) * sideIn <= 0) {
+      const t = (gl - x0) / (s.x - x0 || 1e-9);
+      const yc = y0 + (s.y - y0) * t;
+      const zc = z0 + (s.z - z0) * t;
+      if (Math.abs(yc - CENTER_Y) <= GOAL_HALF && Math.abs(zc - GOAL_HEIGHT) < 5) {
+        s.x = gl + sideIn * 3; s.y = yc; s.z = zc;
+        s.vx = -s.vx * 0.55; s.vy *= 0.8;
+        s.vz = zc >= GOAL_HEIGHT ? Math.abs(s.vz) * 0.5 + 40 : -Math.abs(s.vz) * 0.5 - 30;
+        return 'bar';
+      }
+    }
+    // Posts
+    if (s.z < GOAL_HEIGHT) {
+      for (const py of [CENTER_Y - GOAL_HALF, CENTER_Y + GOAL_HALF]) {
+        const sg = distToSegment({ x: gl, y: py }, { x: x0, y: y0 }, { x: s.x, y: s.y });
+        if (sg.d < POST_R) {
+          const cx = x0 + (s.x - x0) * sg.t;
+          const cy = y0 + (s.y - y0) * sg.t;
+          let nx = cx - gl; let ny = cy - py;
+          const nl = Math.hypot(nx, ny);
+          if (nl < 1e-6) { nx = sideIn; ny = 0; } else { nx /= nl; ny /= nl; }
+          const r = reflect(s.vx, s.vy, nx, ny, 0.7, 0.9);
+          s.vx = r.x; s.vy = r.y;
+          s.x = gl + nx * (POST_R + 0.5);
+          s.y = py + ny * (POST_R + 0.5);
+          return 'post';
+        }
+      }
+    }
+  }
+  return 'none';
+}
+
+/**
+ * One physics step of the ball. Used by the game AND by every predictor/solver, so predictions match reality.
+ * Gravity, air drag (speed dependent), rolling friction (the ball comes to rest), restitution with speed loss,
+ * curl (Magnus), topspin/backspin, and the goal frame.
+ */
+function stepBall(s: BallState, dt: number): BallEvent {
+  const sp0 = Math.hypot(s.vx, s.vy);
+  if (s.curl !== 0 && sp0 > 30) {
+    const a = MAGNUS * s.curl * sp0 * (s.z > 0.5 ? 1 : 0.8);
+    const px = -s.vy / sp0;
+    const py = s.vx / sp0;
+    s.vx += px * a * dt;
+    s.vy += py * a * dt;
+    s.curl *= Math.exp(-0.35 * dt);
+    if (Math.abs(s.curl) < 0.02) s.curl = 0;
+  }
+
+  const x0 = s.x; const y0 = s.y; const z0 = s.z;
+  const airborne = s.z > 0.01 || s.vz > 0;
+  const g = airborne ? G * (1 + 0.35 * s.vspin) : G;          // topspin dips, backspin floats
+  s.x += s.vx * dt;
+  s.y += s.vy * dt;
+  s.z += s.vz * dt;
+  s.vz -= g * dt;
+  if (airborne) s.vspin *= Math.exp(-0.8 * dt);
+
+  let ev: BallEvent = 'none';
+  if (s.z <= 0) {
+    s.z = 0;
+    if (s.vz < -25) {
+      LAST_IMPACT = -s.vz;
+      s.vz = -s.vz * 0.45;                                       // futsal ball: low bounce
+      const hf = Phaser.Math.Clamp(0.88 + 0.12 * s.vspin, 0.6, 1.05);   // backspin checks, topspin kicks on
+      s.vx *= hf; s.vy *= hf;
+      s.vspin *= 0.4;
+      ev = 'bounce';
+    } else {
+      s.vz = 0;
+    }
+  }
+
+  const sp = Math.hypot(s.vx, s.vy);
+  if (s.z > 1) {
+    const f = Math.exp(-(0.10 + 0.0002 * sp) * dt);              // air drag grows with speed
+    s.vx *= f; s.vy *= f;
+  } else {
+    const f = Math.exp(-0.846 * dt);                             // rolling friction
+    s.vx *= f; s.vy *= f;
+    const sp2 = Math.hypot(s.vx, s.vy);
+    const ns = Math.max(0, sp2 - 12 * dt);                       // plus a constant term so it really stops
+    const k = sp2 > 0 ? ns / sp2 : 0;
+    s.vx *= k; s.vy *= k;
+  }
+
+  const gev = collideGoal(s, x0, y0, z0);
+  if (gev !== 'none') ev = gev;
+  return ev;
+}
+
+/** Fly a kick and report where it crosses a goal line (x = lineX). */
+function simulateToLine(
+  from: Pt, angle: number, speed: number, lift: number, curl: number, vspin: number, lineX: number, maxT = 2
+): { y: number; z: number; t: number } | null {
+  const s: BallState = { x: from.x, y: from.y, z: 0, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, vz: lift, curl, vspin };
+  const dirX = lineX > from.x ? 1 : -1;
+  const dt = 1 / 60;
+  for (let i = 1; i <= Math.round(maxT / dt); i++) {
+    const px = s.x; const py = s.y; const pz = s.z;
+    stepBall(s, dt);
+    if ((s.x - lineX) * dirX >= 0) {
+      const k = (lineX - px) / ((s.x - px) || 1e-9);
+      return { y: py + (s.y - py) * k, z: pz + (s.z - pz) * k, t: i * dt };
+    }
+    if (Math.hypot(s.vx, s.vy) < 8) return null;
+  }
+  return null;
+}
+
+/** Find the kick angle so a (possibly curled) shot crosses the line at target.y. */
+function solveAim(from: Pt, target: Pt, speed: number, lift: number, curl: number, vspin: number): number {
+  let a = Math.atan2(target.y - from.y, target.x - from.x);
+  const dxAbs = Math.abs(target.x - from.x) || 1;
+  const dirX = target.x > from.x ? 1 : -1;
+  for (let i = 0; i < 5; i++) {
+    const r = simulateToLine(from, a, speed, lift, curl, vspin, target.x);
+    if (!r) break;
+    const err = target.y - r.y;
+    if (Math.abs(err) < 2) break;
+    a += dirX * Math.atan(err / dxAbs);
+  }
+  return a;
+}
+
+/** Scan for the lift that makes a shot arrive at a given height (used by the debug demos). */
+function solveLift(from: Pt, angle: number, speed: number, targetZ: number, lineX: number): number {
+  let best = 20;
+  let bestErr = Infinity;
+  for (let vz = 20; vz <= 320; vz += 10) {
+    const r = simulateToLine(from, angle, speed, vz, 0, 0, lineX);
+    if (!r) continue;
+    const e = Math.abs(r.z - targetZ);
+    if (e < bestErr) { bestErr = e; best = vz; }
+  }
+  return best;
+}
+
+function lobLanding(v: number, vz: number, vspin: number): number {
+  const s: BallState = { x: 250, y: CENTER_Y, z: 0, vx: v, vy: 0, vz, curl: 0, vspin };
+  const x0 = s.x;
+  for (let i = 0; i < 240; i++) {
+    if (stepBall(s, 1 / 60) === 'bounce') return s.x - x0;
+  }
+  return s.x - x0;
+}
+
+/** A lofted pass: backspin so it holds up and checks on landing, tuned by simulation to land d px away. */
+function solveLob(d: number): { speed: number; vz: number; vspin: number } {
+  const vspin = -0.6;
+  const gEff = G * (1 + 0.35 * vspin);
+  const T = Phaser.Math.Clamp(d / 320, 0.5, 0.95);
+  const vz = (gEff * T) / 2;
+  let v = d / (T * 0.92);
+  for (let i = 0; i < 5; i++) {
+    const land = lobLanding(v, vz, vspin);
+    if (land < 1) break;
+    v *= d / land;
+  }
+  return { speed: v, vz, vspin };
+}
+
 // ═══════════════ PURE GOALKEEPER LOGIC (Phase 3) ═══════════════
 
 const DIVE_T: Record<SaveType, number> = { stand: 0, jump: 0.34, 'dive-low': 0.28, 'dive-high': 0.30, stretch: 0.32 };
@@ -417,16 +616,6 @@ function resolveSaveContact(speed: number, quality: number, z: number): 'catch' 
 
 // ═══════════════ PURE TEAM-AI LOGIC (Phase 4) ═══════════════
 
-function distToSegment(p: Pt, a: Pt, b: Pt): { d: number; t: number } {
-  const abx = b.x - a.x;
-  const aby = b.y - a.y;
-  const len2 = abx * abx + aby * aby;
-  if (len2 < 1e-6) return { d: Math.hypot(p.x - a.x, p.y - a.y), t: 0 };
-  const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2));
-  return { d: Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t)), t };
-}
-
-/** True if an opponent stands in the passing/shooting lane between a and b. */
 function laneBlocked(a: Pt, b: Pt, opps: Pt[], radius: number): boolean {
   for (const o of opps) {
     const s = distToSegment(o, a, b);
@@ -435,26 +624,26 @@ function laneBlocked(a: Pt, b: Pt, opps: Pt[], radius: number): boolean {
   return false;
 }
 
-/** Value of passing from `from` to `to` (higher is better). */
-function scorePass(from: Pt, to: Pt, att: number, opps: Pt[], T: TacticParams): number {
+/** Value of a pass (higher is better). lob = a lofted pass: it flies over the lane but is less precise. */
+function scorePass(from: Pt, to: Pt, att: number, opps: Pt[], T: TacticParams, lob = false): number {
   const goalX = att === 1 ? FIELD_W - LINE : LINE;
   const d = Math.hypot(to.x - from.x, to.y - from.y);
-  let s = att * (to.x - from.x) * (0.08 + T.riskPass * 0.22);        // progression
+  let s = att * (to.x - from.x) * (0.08 + T.riskPass * 0.22);
   let minOpp = 90;
   for (const o of opps) minOpp = Math.min(minOpp, Math.hypot(o.x - to.x, o.y - to.y));
-  s += (Math.min(minOpp, 90) - 30) * 0.5;                            // receiver is open
-  if (laneBlocked(from, to, opps, 15)) s -= 70;                      // lane is cut
+  s += (Math.min(minOpp, 90) - 30) * 0.5;
+  if (lob) s -= 12;
+  else if (laneBlocked(from, to, opps, 15)) s -= 70;
   if (d > 300) s -= (d - 300) * 0.25;
   if (d < 45) s -= 25;
-  s -= Math.max(0, d - 150) * T.shortBias * 0.15;                    // tactic's taste for short passing
-  s += Math.max(0, 300 - Math.abs(goalX - to.x)) * 0.05;             // closer to goal is better
+  s -= Math.max(0, d - 150) * T.shortBias * 0.15;
+  s += Math.max(0, 300 - Math.abs(goalX - to.x)) * 0.05;
   return s;
 }
 
-/** Quality (0..1) of a shot from `pos`: distance, goal angle, blockers, keeper position. */
 function shotQuality(pos: Pt, att: number, opps: Pt[], gk: Pt | null): number {
   const goalX = att === 1 ? FIELD_W - LINE : LINE;
-  if (att * (goalX - pos.x) < 25) return 0;                          // level with / behind the goal line
+  if (att * (goalX - pos.x) < 25) return 0;
   const d = Math.hypot(goalX - pos.x, CENTER_Y - pos.y);
   const a1 = Math.atan2(CENTER_Y - GOAL_HALF - pos.y, goalX - pos.x);
   const a2 = Math.atan2(CENTER_Y + GOAL_HALF - pos.y, goalX - pos.x);
@@ -469,7 +658,6 @@ function shotQuality(pos: Pt, att: number, opps: Pt[], gk: Pt | null): number {
   return Phaser.Math.Clamp(q, 0, 1);
 }
 
-/** Man-marking: the most dangerous opponent (nearest our goal) is assigned first. result[i] = opponent index or -1. */
 function assignMarks(defs: Pt[], opps: Pt[], ownGoalX: number): number[] {
   const res = defs.map(() => -1);
   const order = opps
@@ -491,7 +679,6 @@ function assignMarks(defs: Pt[], opps: Pt[], ownGoalX: number): number[] {
   return res;
 }
 
-/** Where a formation slot wants to be, given phase, tactic and the ball. */
 function shapeTarget(slot: Slot, side: TeamSide, phase: Phase, tactic: Tactic, ball: Pt): Pt {
   const att = side === 'home' ? 1 : -1;
   const T = TACTICS[tactic];
@@ -502,15 +689,15 @@ function shapeTarget(slot: Slot, side: TeamSide, phase: Phase, tactic: Tactic, b
     roleOff = (slot.role === 'DEF' ? 25 : slot.role === 'MID' ? 60 : 100) + T.lineShift * 0.4;
   } else if (phase === 'defend') {
     roleOff = (slot.role === 'FWD' ? -20 : slot.role === 'MID' ? -30 : -40) + T.lineShift;
-    if (slot.role === 'FWD' && tactic === 'counter') roleOff = 40;   // stay high for the break
+    if (slot.role === 'FWD' && tactic === 'counter') roleOff = 40;
   }
   const x = slot.x + att * (shift + roleOff);
   let y = CENTER_Y + (slot.y - CENTER_Y) * T.width * (phase === 'attack' ? 1.1 : 0.85);
-  if (phase !== 'attack') y += (ball.y - y) * 0.25;                   // compact toward the ball when defending
+  if (phase !== 'attack') y += (ball.y - y) * 0.25;
   return clampPt(x, y);
 }
 
-/** Run with ?selftest in the URL — logs the Phase 1–4 pure-logic tests. */
+/** Run with ?selftest in the URL — logs the Phase 1–5 pure-logic tests. */
 function runSelfTests(): void {
   const results: [string, boolean][] = [];
   const t = (name: string, ok: boolean) => results.push([name, ok]);
@@ -618,6 +805,68 @@ function runSelfTests(): void {
     TACTICS.press.pressers > TACTICS.balanced.pressers && TACTICS.press.pressRadius > TACTICS.defensive.pressRadius &&
     TACTICS.counter.forwardRuns > TACTICS.possession.forwardRuns && TACTICS.defensive.lineShift < TACTICS.balanced.lineShift &&
     TACTICS.balanced.lineShift < TACTICS.press.lineShift && TACTICS.counter.counterMs > 0);
+  // ── Phase 5
+  const mkB = (o: Partial<BallState>): BallState => ({ x: 450, y: 260, z: 0, vx: 0, vy: 0, vz: 0, curl: 0, vspin: 0, ...o });
+  const spd = (s: BallState) => Math.hypot(s.vx, s.vy);
+  const stepFor = (s: BallState, secs: number): void => { for (let n = 0; n < Math.round(secs * 60); n++) stepBall(s, 1 / 60); };
+  const air = mkB({ vx: 300, vz: 300 }); stepFor(air, 0.5);
+  const gnd = mkB({ vx: 300 }); stepFor(gnd, 0.5);
+  t('P5 an airborne ball decelerates less than a rolling ball', spd(air) > spd(gnd) + 50);
+  const drop = mkB({ z: 30 });
+  let bounced = false; let maxAfter = 0;
+  for (let n = 0; n < 240; n++) {
+    const ev = stepBall(drop, 1 / 60);
+    if (ev === 'bounce') bounced = true; else if (bounced) maxAfter = Math.max(maxAfter, drop.z);
+  }
+  t('P5 a dropped ball bounces low and comes to rest', bounced && maxAfter < 10 && drop.z === 0 && drop.vz === 0);
+  const roll = mkB({ vx: 200 }); stepFor(roll, 5);
+  t('P5 a rolling ball decelerates to a stop', spd(roll) < 1);
+  const sa = simulateToLine({ x: 681, y: 260 }, 0, 300, 20, 0, 0, 881);
+  const sb = simulateToLine({ x: 681, y: 260 }, 0, 520, 20, 0, 0, 881);
+  t('P5 shot strength changes the outcome (a hard shot arrives much sooner)', !!sa && !!sb && sa.t - sb.t > 0.2);
+  const lob = solveLob(260);
+  const lobB = mkB({ x: 250, vx: lob.speed, vz: lob.vz, vspin: lob.vspin });
+  let lobMax = 0;
+  for (let n = 0; n < 60; n++) { stepBall(lobB, 1 / 60); lobMax = Math.max(lobMax, lobB.z); }
+  const driveB = mkB({ x: 250, vx: 300, vz: 8 });
+  let driveMax = 0;
+  for (let n = 0; n < 60; n++) { stepBall(driveB, 1 / 60); driveMax = Math.max(driveMax, driveB.z); }
+  t('P5 a lofted pass flies much higher than a driven pass', lobMax > 10 && driveMax < 3);
+  t('P5 a lofted pass lands where it was aimed', Math.abs(lobLanding(lob.speed, lob.vz, lob.vspin) - 260) < 12);
+  const cu = mkB({ vx: 400, vz: 120, curl: 0.9 }); stepFor(cu, 0.6);
+  const st = mkB({ vx: 400, vz: 120 }); stepFor(st, 0.6);
+  const cn = mkB({ vx: 400, vz: 120, curl: -0.9 }); stepFor(cn, 0.6);
+  t('P5 curl bends the ball sideways, opposite curls go opposite ways', cu.y > st.y + 15 && cn.y < st.y - 15);
+  const from: Pt = { x: 700, y: 110 };
+  const aim = solveAim(from, { x: 881, y: 290 }, 420, 20, 0.9, 0);
+  const rc = simulateToLine(from, aim, 420, 20, 0.9, 0, 881);
+  const rs = simulateToLine(from, aim, 420, 20, 0, 0, 881);
+  t('P5 a curled shot can be aimed to hit its target', !!rc && Math.abs(rc.y - 290) < 8);
+  t('P5 the same aim without curl misses (curl really matters)', !!rs && Math.abs(rs.y - 290) > 6);
+  const firstEvent = (s: BallState, steps: number): BallEvent => {
+    for (let n = 0; n < steps; n++) { const ev = stepBall(s, 1 / 60); if (ev === 'post' || ev === 'bar') return ev; }
+    return 'none';
+  };
+  const postB = mkB({ x: 100, y: CENTER_Y - GOAL_HALF, z: 5, vx: -400 });
+  t('P5 the ball hits the post and comes back into play', firstEvent(postB, 60) === 'post' && postB.vx > 0);
+  const barB = mkB({ x: 100, y: CENTER_Y, z: 40, vx: -400, vz: 40 });
+  t('P5 the ball hits the crossbar and comes back into play', firstEvent(barB, 60) === 'bar' && barB.vx > 0);
+  const thr = mkB({ x: 100, y: CENTER_Y, z: 15, vx: -400 });
+  let anyEv = false;
+  for (let n = 0; n < 90; n++) { const ev = stepBall(thr, 1 / 60); if (ev === 'post' || ev === 'bar') anyEv = true; }
+  t('P5 a shot through the goal mouth under the bar is not stopped', !anyEv && thr.x < LINE);
+  const rA = reflect(-300, 0, 0.9, 0.436, 0.5, 0.85);
+  const rB = reflect(-300, 0, 0.9, -0.436, 0.5, 0.85);
+  t('P5 deflection direction depends on the contact side', rA.y > 20 && rB.y < -20 && rA.x > 0 && rB.x > 0);
+  const landTime = (spin: number): number => {
+    const s = mkB({ vz: 150, vspin: spin });
+    for (let n = 1; n < 300; n++) if (stepBall(s, 1 / 60) === 'bounce') return n / 60;
+    return 99;
+  };
+  t('P5 topspin dips (lands sooner), backspin floats', landTime(1) < landTime(0) && landTime(0) < landTime(-1));
+  const lobScore = scorePass({ x: 400, y: 260 }, { x: 600, y: 260 }, 1, [{ x: 500, y: 260 }], TACTICS.balanced, true);
+  const driveScore = scorePass({ x: 400, y: 260 }, { x: 600, y: 260 }, 1, [{ x: 500, y: 260 }], TACTICS.balanced, false);
+  t('P5 a lofted pass is valued over a blocked driven pass', lobScore > driveScore + 30);
   const failed = results.filter((r) => !r[1]);
   results.forEach(([n, ok]) => console.log(`${ok ? '✅' : '❌'} ${n}`));
   console.log(failed.length === 0 ? `SELF-TEST: all ${results.length} passed` : `SELF-TEST: ${failed.length} FAILED`);
@@ -640,11 +889,17 @@ class RetroKickScene extends Phaser.Scene {
   private ball!: Phaser.GameObjects.Arc;
   private ballVis!: Phaser.GameObjects.Arc;
   private ballInner!: Phaser.GameObjects.Arc;
+  private ballInner2!: Phaser.GameObjects.Arc;
   private ballShadow!: Phaser.GameObjects.Ellipse;
+  private trailGfx!: Phaser.GameObjects.Graphics;
+  private trail: Pt[] = [];
   private ballHeight = 0;
   private ballVz = 0;
   private ballVx = 0;
   private ballVy = 0;
+  private ballCurl = 0;
+  private ballVSpin = 0;
+  private ballSquash = 0;
   private ballSpin = 0;
   private possession: TeamSide | null = 'home';
   private lastTouch: TeamSide = 'home';
@@ -676,8 +931,9 @@ class RetroKickScene extends Phaser.Scene {
 
   private shooter: Footballer | null = null;
   private shooterUntil = 0;
+  private shotCharging = false;
+  private shotPower = 0.5;
 
-  // Phase 4 state
   private tactics: Record<TeamSide, Tactic> = { home: 'balanced', away: 'balanced' };
   private carrier: Footballer | null = null;
   private carrierSince = 0;
@@ -715,7 +971,7 @@ class RetroKickScene extends Phaser.Scene {
     this.createBall();
     this.createOverlays();
     this.keys = this.input.keyboard!.addKeys(
-      'W,A,S,D,UP,DOWN,LEFT,RIGHT,X,Z,C,SPACE,SHIFT,P,ENTER,T,G'
+      'W,A,S,D,UP,DOWN,LEFT,RIGHT,X,Z,C,V,SPACE,SHIFT,P,ENTER,T,G'
     ) as Record<string, Phaser.Input.Keyboard.Key>;
     this.homeScoreEl = document.getElementById('home-score');
     this.awayScoreEl = document.getElementById('away-score');
@@ -734,7 +990,6 @@ class RetroKickScene extends Phaser.Scene {
     });
     document.getElementById('restart-button')?.addEventListener('click', () => this.resetMatch());
 
-    // Tactics from the URL: ?tactic=press (CPU) and ?home=defensive (your team)
     const qs = new URLSearchParams(window.location.search);
     const fromUrl = (v: string | null): Tactic | null => (v && (TACTIC_ORDER as string[]).includes(v) ? (v as Tactic) : null);
     this.tactics.away = fromUrl(qs.get('tactic')) ?? 'balanced';
@@ -742,6 +997,8 @@ class RetroKickScene extends Phaser.Scene {
     this.updateTacticLabel();
 
     // Debug hooks (only with ?selftest)
+    //   retroKickDebug.demo('drivenPass' | 'lobPass' | 'weakShot' | 'strongShot' | 'powerShot' | 'curlShot' | 'post' | 'bar')
+    //   retroKickDebug.shot('away', 230, 4) · retroKickDebug.tactic('away','press') · retroKickDebug.stats() · retroKickDebug.act(5,'shoot')
     if (qs.has('selftest')) {
       (window as any).retroKickDebug = {
         players: this.players,
@@ -749,6 +1006,7 @@ class RetroKickScene extends Phaser.Scene {
         shot: (side: TeamSide, y: number, z: number, speed = 380) => this.fireTestShot(side, y, z, speed),
         tactic: (side: TeamSide, name: Tactic) => this.cycleTactic(side, name),
         stats: () => this.statsSummary(),
+        demo: (kind: string) => this.fireDemo(kind),
       };
     }
 
@@ -923,9 +1181,11 @@ class RetroKickScene extends Phaser.Scene {
 
   private createBall(): void {
     this.ballShadow = this.add.ellipse(FIELD_W / 2 + 2, FIELD_H / 2 + 6, 14, 6, 0x000000, 0.4).setDepth(12);
+    this.trailGfx = this.add.graphics().setDepth(29);
     this.ball = this.add.circle(FIELD_W / 2, FIELD_H / 2, 6, 0xffffff, 0).setVisible(false);
     this.ballVis = this.add.circle(FIELD_W / 2, FIELD_H / 2, 6, 0xffffff, 1).setStrokeStyle(1.5, 0x111111).setDepth(30);
     this.ballInner = this.add.circle(FIELD_W / 2, FIELD_H / 2, 2, 0x111111).setDepth(31);
+    this.ballInner2 = this.add.circle(FIELD_W / 2, FIELD_H / 2, 1.6, 0x555555).setDepth(31);
   }
 
   // ═══════════════ PLAYER ANIMATION ═══════════════
@@ -987,8 +1247,8 @@ class RetroKickScene extends Phaser.Scene {
     p.vis = Phaser.Math.Angle.Wrap(p.vis + Phaser.Math.Clamp(diff, -maxTurn, maxTurn));
     const remaining = Phaser.Math.Angle.Wrap(target - p.vis);
 
-    const G = gaitFor(p.speed, GAIT_TMP);
-    p.stride += (p.speed * dt / G.cycle) * Math.PI * 2;
+    const G2 = gaitFor(p.speed, GAIT_TMP);
+    p.stride += (p.speed * dt / G2.cycle) * Math.PI * 2;
 
     if (p.act) p.anim = p.act.type;
     else if (p.celebrating) p.anim = 'celebrate';
@@ -996,7 +1256,7 @@ class RetroKickScene extends Phaser.Scene {
     else if (moving && Math.abs(remaining) > 0.7) p.anim = 'turn';
     else p.anim = classifyLocomotion(p.speed);
 
-    this.drawPlayer(p, G, remaining, moving);
+    this.drawPlayer(p, G2, remaining, moving);
     p.sprite.setDepth(20 + y / FIELD_H);
   }
 
@@ -1089,7 +1349,7 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  private drawPlayer(p: Footballer, G: Gait, rem: number, moving: boolean): void {
+  private drawPlayer(p: Footballer, G2: Gait, rem: number, moving: boolean): void {
     const g = p.rig;
     g.clear();
     const k = p.kit;
@@ -1100,19 +1360,19 @@ class RetroKickScene extends Phaser.Scene {
     const ph = p.stride;
     const sL = Math.sin(ph);
     const sR = Math.sin(ph + Math.PI);
-    const liftAmt = Math.min(1, G.legAmp / 8);
-    let stance = G.stance;
-    let fLx = G.legAmp * sL;
-    let fRx = G.legAmp * sR;
+    const liftAmt = Math.min(1, G2.legAmp / 8);
+    let stance = G2.stance;
+    let fLx = G2.legAmp * sL;
+    let fRx = G2.legAmp * sR;
     let fLy = -stance;
     let fRy = stance;
     let liftL = Math.max(0, Math.cos(ph)) * liftAmt;
     let liftR = Math.max(0, Math.cos(ph + Math.PI)) * liftAmt;
-    let hLx = G.armAmp * sR;
-    let hRx = G.armAmp * sL;
-    let hLy = -(9.2 - G.elbowIn);
-    let hRy = 9.2 - G.elbowIn;
-    let lean = G.lean + Math.sin(now * 0.002 + p.number) * 0.25 * (1 - liftAmt);
+    let hLx = G2.armAmp * sR;
+    let hRx = G2.armAmp * sL;
+    let hLy = -(9.2 - G2.elbowIn);
+    let hRy = 9.2 - G2.elbowIn;
+    let lean = G2.lean + Math.sin(now * 0.002 + p.number) * 0.25 * (1 - liftAmt);
     let sx = 1;
     let sy = 1;
     let offX = 0;
@@ -1312,11 +1572,29 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private syncBallVisuals(): void {
-    const vy = this.ball.y - this.ballHeight * 0.9;
-    this.ballVis.setPosition(this.ball.x, vy).setScale(1 + this.ballHeight * 0.012);
-    this.ballInner.setPosition(this.ball.x + Math.cos(this.ballSpin) * 2, vy + Math.sin(this.ballSpin) * 2);
-    this.ballShadow.setPosition(this.ball.x + 2 + this.ballHeight * 0.15, this.ball.y + 6 + this.ballHeight * 0.1);
-    this.ballShadow.setScale(1 - Math.min(0.5, this.ballHeight * 0.015));
+    const h = this.ballHeight;
+    const vx = this.ball.x;
+    const vy = this.ball.y - h * 0.9;
+    const base = 1 + h * 0.012;
+    const sq = this.ballSquash;
+    this.ballVis.setPosition(vx, vy).setScale(base * (1 + 0.2 * sq), base * (1 - 0.2 * sq));
+    const a = this.ballSpin;
+    this.ballInner.setPosition(vx + Math.cos(a) * 2.4, vy + Math.sin(a) * 2.4);
+    this.ballInner2.setPosition(vx - Math.cos(a) * 2.4, vy - Math.sin(a) * 2.4);
+    // the shadow stays on the ground: it shrinks, fades and drifts as the ball rises
+    this.ballShadow.setPosition(this.ball.x + 2 + h * 0.15, this.ball.y + 6 + h * 0.1);
+    this.ballShadow.setScale(1 - Math.min(0.5, h * 0.015));
+    this.ballShadow.setAlpha(0.4 - Math.min(0.22, h * 0.007));
+
+    // motion trail on fast balls
+    this.trail.push({ x: vx, y: vy });
+    if (this.trail.length > 5) this.trail.shift();
+    this.trailGfx.clear();
+    if (Math.hypot(this.ballVx, this.ballVy) > 330) {
+      this.trail.forEach((q, i) => {
+        this.trailGfx.fillStyle(0xffffff, 0.06 + 0.05 * i).fillCircle(q.x, q.y, 3.2 + i * 0.5);
+      });
+    }
   }
 
   private handlePeriodEnd(): void {
@@ -1414,8 +1692,38 @@ class RetroKickScene extends Phaser.Scene {
       if (this.possession === 'home' && distance < 48) this.passBall();
       else this.selectControlled();
     }
-    if (Phaser.Input.Keyboard.JustDown(this.keys.Z)) this.shootBall();
+
+    // Shooting: hold Z to charge power, release to shoot (a tap is a normal shot)
+    const kz = this.keys.Z;
+    if (Phaser.Input.Keyboard.JustDown(kz)) {
+      const d = dist(this.controlled.sprite.x, this.controlled.sprite.y, this.ball.x, this.ball.y);
+      if (this.gkHolder || (this.possession !== 'home' && d > 42)) {
+        if (!this.gkHolder) this.setMessage('⚠ Get closer to shoot');
+      } else {
+        this.shotCharging = true;
+        this.shotPower = 0.5;
+      }
+    }
+    if (this.shotCharging) {
+      this.shotPower = Math.min(1, this.shotPower + dt * 0.85);
+      this.drawShotBar();
+      if (Phaser.Input.Keyboard.JustUp(kz) || !kz.isDown) {
+        this.shotCharging = false;
+        this.aimGfx.clear();
+        this.shootBall(this.shotPower);
+      }
+    }
+
     if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE)) this.tackle();
+  }
+
+  private drawShotBar(): void {
+    const g = this.aimGfx;
+    g.clear();
+    const x = this.controlled.sprite.x - 20;
+    const y = this.controlled.sprite.y - 32;
+    g.fillStyle(0x000000, 0.6).fillRect(x, y, 40, 6);
+    g.fillStyle(this.shotPower > 0.85 ? 0xef476f : this.shotPower > 0.65 ? 0xffd23f : 0x06d6a0, 1).fillRect(x, y, 40 * this.shotPower, 6);
   }
 
   // ═══════════════ TEAM AI (Phase 4) ═══════════════
@@ -1445,7 +1753,6 @@ class RetroKickScene extends Phaser.Scene {
     return this.predCache;
   }
 
-  /** The one player of `side` who can reach a pass in flight, if any. */
   private getInterceptor(side: TeamSide, mates: Footballer[], now: number): { p: Footballer; x: number; y: number } | null {
     const cur = this.interceptors[side];
     if (cur && now < cur.until && mates.includes(cur.p)) return cur;
@@ -1454,6 +1761,7 @@ class RetroKickScene extends Phaser.Scene {
     let best: { p: Footballer; x: number; y: number; t: number } | null = null;
     for (let i = 3; i < samples.length; i += 3) {
       const s = samples[i];
+      if (s.z > 10) continue;                                   // a ball in the air above head height cannot be intercepted
       for (const p of mates) {
         const reach = dist(p.sprite.x, p.sprite.y, s.x, s.y) / 175;
         if (reach <= s.t - 0.05 && (!best || s.t < best.t)) best = { p, x: s.x, y: s.y, t: s.t };
@@ -1463,7 +1771,6 @@ class RetroKickScene extends Phaser.Scene {
     return this.interceptors[side];
   }
 
-  /** Support player: finds an open spot around the carrier to receive a pass. */
   private supportOrder(p: Footballer, cpos: Pt, att: number, foePts: Pt[], T: TacticParams, taken: Pt[], now: number, speed: number): Order {
     let h = this.aiHold.get(p);
     if (!h || now > h.until) {
@@ -1487,7 +1794,6 @@ class RetroKickScene extends Phaser.Scene {
     return { x: h.x, y: h.y, speed };
   }
 
-  /** Forward: makes a run into open space ahead of the carrier, or stays wide for a lateral option. */
   private runnerOrder(p: Footballer, cpos: Pt, att: number, foePts: Pt[], T: TacticParams, taken: Pt[], now: number, speed: number, counter: boolean): Order {
     let h = this.aiHold.get(p);
     if (!h || now > h.until) {
@@ -1551,7 +1857,6 @@ class RetroKickScene extends Phaser.Scene {
         if (p === carrier) continue;
         const ot = this.oneTwo;
         if (ot && ot.passer === p && ot.passer.side === side && now < ot.until) {
-          // one-two: the passer runs into space beyond the receiver
           const r = ot.receiver;
           const sy = r.sprite.y < CENTER_Y ? 1 : -1;
           const c = clampPt(r.sprite.x + att * 95, r.sprite.y + sy * 45);
@@ -1559,9 +1864,10 @@ class RetroKickScene extends Phaser.Scene {
           continue;
         }
         if (this.passTarget === p) {
-          // receiver moves to meet a pass in flight
+          // the receiver moves to where the pass will arrive (for a lob: where it lands)
           const pred = this.getBallPrediction();
-          const e = pred.length ? pred[Math.min(pred.length - 1, 36)] : ball;
+          const landing = pred.find((s) => s.t > 0.2 && s.z < 1.5);
+          const e = landing ?? (pred.length ? pred[Math.min(pred.length - 1, 36)] : ball);
           orders.set(p, { x: e.x, y: e.y, speed: SPR });
           continue;
         }
@@ -1579,7 +1885,7 @@ class RetroKickScene extends Phaser.Scene {
       const gx = ownGoal.x - cpos.x;
       const gy = ownGoal.y - cpos.y;
       const gl = Math.hypot(gx, gy) || 1;
-      const dirG: Pt = { x: gx / gl, y: gy / gl };            // from the ball toward our goal
+      const dirG: Pt = { x: gx / gl, y: gy / gl };
       const icpt = !carrier && this.possession === null ? this.getInterceptor(side, mates, now) : null;
       if (icpt) orders.set(icpt.p, { x: icpt.x, y: icpt.y, speed: SPR + 10 });
       const free = mates.filter((p) => !icpt || p !== icpt.p);
@@ -1591,10 +1897,10 @@ class RetroKickScene extends Phaser.Scene {
         const p1 = byDist[0];
         const d1 = dist(p1.sprite.x, p1.sprite.y, cpos.x, cpos.y);
         if (d1 <= T.pressRadius) {
-          orders.set(p1, { x: cpos.x + dirG.x * 20, y: cpos.y + dirG.y * 20, speed: SPR });   // close down, goal-side
+          orders.set(p1, { x: cpos.x + dirG.x * 20, y: cpos.y + dirG.y * 20, speed: SPR });
           tackler = p1;
         } else {
-          orders.set(p1, { x: cpos.x + dirG.x * 55, y: cpos.y + dirG.y * 55, speed: RUN });   // contain / jockey
+          orders.set(p1, { x: cpos.x + dirG.x * 55, y: cpos.y + dirG.y * 55, speed: RUN });
         }
         pressers.push(p1);
         coverBase = { x: cpos.x + dirG.x * 20, y: cpos.y + dirG.y * 20 };
@@ -1605,7 +1911,6 @@ class RetroKickScene extends Phaser.Scene {
         }
       }
       let pool = free.filter((p) => !pressers.includes(p));
-      // cover: sit behind the presser on the line to goal
       if (carrier && pool.length) {
         const cp: Pt = { x: coverBase.x + dirG.x * 55, y: coverBase.y + dirG.y * 55 };
         const cand = pool.filter((p) => p.role !== 'FWD');
@@ -1616,7 +1921,6 @@ class RetroKickScene extends Phaser.Scene {
           pool = pool.filter((p) => p !== cov);
         }
       }
-      // protect the goal when the ball is close to it
       if (dist(cpos.x, cpos.y, ownGoal.x, ownGoal.y) < 230 && pool.length) {
         const cand = pool.filter((p) => p.role !== 'FWD');
         if (cand.length) {
@@ -1629,7 +1933,6 @@ class RetroKickScene extends Phaser.Scene {
           pool = pool.filter((p) => p !== last);
         }
       }
-      // man-marking: most dangerous opponents first, standing goal-side
       const markers = pool.filter((p) => p.role !== 'FWD' || tac === 'press');
       const markFoes = foes.filter((f) => f !== carrier);
       if (markers.length && markFoes.length) {
@@ -1644,7 +1947,7 @@ class RetroKickScene extends Phaser.Scene {
           const f = markFoes[oi];
           const fx = f.sprite.x;
           const fy = f.sprite.y;
-          if (Math.hypot(fx - ownGoal.x, fy - ownGoal.y) > 520) return;      // not dangerous yet: keep shape
+          if (Math.hypot(fx - ownGoal.x, fy - ownGoal.y) > 520) return;
           const ux = ownGoal.x - fx; const uy = ownGoal.y - fy;
           const ul = Math.hypot(ux, uy) || 1;
           const bx = ball.x - fx; const by = ball.y - fy;
@@ -1656,7 +1959,6 @@ class RetroKickScene extends Phaser.Scene {
           });
         });
       }
-      // measure how high this team defends (used by the debug stats)
       let sum = 0;
       for (const p of mates) sum += Math.abs(p.sprite.x - ownGoal.x);
       if (mates.length) { this.stats[side].lineSum += sum / mates.length; this.stats[side].lineN++; }
@@ -1678,12 +1980,11 @@ class RetroKickScene extends Phaser.Scene {
     if (carrierAway && this.carrier === carrierAway) this.carryBallAI(carrierAway);
     if (tackler && this.aiTackle(tackler)) return;
     if (chaser && this.possession === null && Math.hypot(this.ballVx, this.ballVy) < 150 &&
-        dist(chaser.sprite.x, chaser.sprite.y, ball.x, ball.y) < 20) {
+        dist(chaser.sprite.x, chaser.sprite.y, ball.x, ball.y) < 20 && this.ballHeight < 6) {
       this.controlBall(chaser);
     }
   }
 
-  /** CPU ball carrier: shoot, pass or dribble — decided from shot quality and pass scores. */
   private cpuCarrierThink(c: Footballer, foes: Footballer[], dt: number, counter: boolean): Order {
     const side = c.side;
     const T = TACTICS[this.tactics[side]];
@@ -1693,7 +1994,7 @@ class RetroKickScene extends Phaser.Scene {
     const hold: Order = { x: pos.x, y: pos.y, speed: 0 };
     if (this.kickoffLock > 0 || this.gkHolder) return hold;
 
-    if (dist(pos.x, pos.y, this.ball.x, this.ball.y) > 34) {      // lost the ball
+    if (dist(pos.x, pos.y, this.ball.x, this.ball.y) > 34) {
       this.carrier = null;
       return { x: this.ball.x, y: this.ball.y, speed: 165 };
     }
@@ -1717,23 +2018,27 @@ class RetroKickScene extends Phaser.Scene {
         return hold;
       }
 
-      // 2) best pass option (one-two return, through balls for runners)
-      let best: { m: Footballer; lead: Pt; score: number; through: boolean } | null = null;
+      // 2) best pass option: driven or lofted (a lob avoids a blocked lane), through balls for runners
+      let best: { m: Footballer; lead: Pt; score: number; through: boolean; lob: boolean } | null = null;
       for (const m of this.players) {
         if (m.side !== side || m === c || m.role === 'GK') continue;
         const lead: Pt = { x: m.sprite.x + m.vx * 0.3, y: m.sprite.y + m.vy * 0.3 };
-        let s = scorePass(pos, lead, att, foePts, T);
+        const dd = Math.hypot(lead.x - pos.x, lead.y - pos.y);
+        const sDrive = scorePass(pos, lead, att, foePts, T);
+        const sLob = dd >= 90 && dd <= 330 ? scorePass(pos, lead, att, foePts, T, true) : -1e9;
+        const lob = sLob > sDrive;
+        let s = Math.max(sDrive, sLob);
         if (this.oneTwo && now < this.oneTwo.until && this.oneTwo.receiver === c && this.oneTwo.passer === m) s += 45;
-        const through = m.role === 'FWD' && att * (lead.x - pos.x) > 60;
+        const through = !lob && m.role === 'FWD' && att * (lead.x - pos.x) > 60;
         if (through) s += 15 * T.riskPass;
-        if (!best || s > best.score) best = { m, lead, score: s, through };
+        if (!best || s > best.score) best = { m, lead, score: s, through, lob };
       }
       const wantsPass = best !== null && (
         (pressure < 45 && best.score > -20) ||
         (held >= T.holdTime && best.score > 12) ||
         held > 2.5);
       if (wantsPass && best) {
-        this.cpuPass(c, best.m, best.lead, best.through);
+        this.cpuPass(c, best.m, best.lead, best.through, best.lob);
         return hold;
       }
     }
@@ -1762,44 +2067,39 @@ class RetroKickScene extends Phaser.Scene {
       this.ball.y = c.sprite.y + Math.sin(c.facing) * 15;
       this.ballVx = c.vx * 0.25;
       this.ballVy = c.vy * 0.25;
+      this.ballCurl = 0; this.ballVSpin = 0;
       this.registerTouch(c);
     }
   }
 
+  /** CPU shot: power, curl and height chosen from the situation. */
   private cpuShoot(c: Footballer, q: number, dGoal: number): void {
     const side = c.side;
-    const att = side === 'home' ? 1 : -1;
-    const goalX = att === 1 ? FIELD_W - LINE : LINE;
     const gk = this.keeperOf(other(side)).sprite;
-    // aim at the side of the goal the keeper is not covering
     const ty = (gk.y >= CENTER_Y ? CENTER_Y - (GOAL_HALF - 14) : CENTER_Y + (GOAL_HALF - 14)) + Phaser.Math.Between(-8, 8);
-    const ang = Math.atan2(ty - this.ball.y, goalX - this.ball.x);
-    const speed = 330 + q * 90;
-    const lift = shotLiftFor(speed, dGoal, Math.random() < 0.3);
-    this.kickBall(Math.cos(ang) * speed, Math.sin(ang) * speed, c, lift, 'shoot');
+    const wide = Math.abs(c.sprite.y - CENTER_Y) > 70;
+    const power = dGoal > 200 ? Phaser.Math.FloatBetween(0.85, 1) : Phaser.Math.Clamp(0.45 + q * 0.3 + Phaser.Math.FloatBetween(0, 0.15), 0.45, 0.9);
+    const curlOn = wide && dGoal < 280 && Math.random() < 0.4;
+    this.takeShot(c, ty, power, Math.random() < 0.3, curlOn);
     this.playSound('shoot');
-    this.setMessage(`Shot from ${teamName(side)}!`);
+    this.setMessage(`${power > 0.85 ? 'Power shot' : curlOn ? 'Curled shot' : 'Shot'} from ${teamName(side)}!`);
   }
 
-  private cpuPass(c: Footballer, target: Footballer, lead: Pt, through: boolean): void {
+  private cpuPass(c: Footballer, target: Footballer, lead: Pt, through: boolean, lob: boolean): void {
     const T = TACTICS[this.tactics[c.side]];
     const att = c.side === 'home' ? 1 : -1;
     const now = this.time.now;
-    const d = dist(this.ball.x, this.ball.y, lead.x, lead.y);
-    const speed = Phaser.Math.Clamp(d * 1.35, 200, through ? 360 : 320);
-    const ang = Math.atan2(lead.y - this.ball.y, lead.x - this.ball.x);
     const isReturn = this.oneTwo !== null && this.oneTwo.receiver === c;
-    this.kickBall(Math.cos(ang) * speed, Math.sin(ang) * speed, c, 12, 'pass');
+    this.playPass(c, lead, lob, through);
     this.passTarget = target;
     if (isReturn) this.oneTwo = null;
-    else if (dist(c.sprite.x, c.sprite.y, target.sprite.x, target.sprite.y) < 170 &&
+    else if (!lob && dist(c.sprite.x, c.sprite.y, target.sprite.x, target.sprite.y) < 170 &&
              att * (target.sprite.x - c.sprite.x) > -20 && Math.random() < T.oneTwo) {
-      this.oneTwo = { passer: c, receiver: target, until: now + 1600 };   // give-and-go
+      this.oneTwo = { passer: c, receiver: target, until: now + 1600 };
     }
     this.playSound('pass');
   }
 
-  /** A closing-down defender tries to win the ball. Same chances and foul risk for both teams. */
   private aiTackle(p: Footballer): boolean {
     if (p.cooldown > 0 || this.gkHolder) return false;
     if (dist(p.sprite.x, p.sprite.y, this.ball.x, this.ball.y) >= 23) return false;
@@ -1812,12 +2112,28 @@ class RetroKickScene extends Phaser.Scene {
     }
     if (roll < 60) {
       this.stats[p.side].tackles++;
+      const loser = p.side === 'home' ? this.carrier : this.controlled;
       this.playSound('tackle');
-      this.controlBall(p);
+      this.knockLoose(p, loser);                           // the ball is knocked free and contested
       this.spawnDustParticles(this.ball.x, this.ball.y);
-      this.setMessage(`Ball won by ${teamName(p.side)}!`);
+      this.setMessage(`${teamName(p.side)} win the tackle — loose ball!`);
     }
     return false;
+  }
+
+  /** After a won tackle the ball squirts away from the tackle and both players must fight for it. */
+  private knockLoose(tackler: Footballer, loser: Footballer | null): void {
+    const ang = tackler.facing + Phaser.Math.FloatBetween(-0.5, 0.5);
+    this.ballVx = Math.cos(ang) * 140 + (loser ? loser.vx * 0.3 : 0);
+    this.ballVy = Math.sin(ang) * 140 + (loser ? loser.vy * 0.3 : 0);
+    this.ballVz = 18;
+    this.ballCurl = Phaser.Math.FloatBetween(-0.3, 0.3);
+    this.ballVSpin = 0;
+    this.possession = null;
+    this.carrier = null;
+    this.registerTouch(tackler);
+    tackler.cooldown = 0;
+    if (loser) loser.cooldown = 0.45;
   }
 
   // ═══════════════ MOVEMENT ═══════════════
@@ -1838,6 +2154,7 @@ class RetroKickScene extends Phaser.Scene {
         this.ball.y = p.sprite.y + Math.sin(p.facing) * 15;
         this.ballVx = p.vx * 0.25;
         this.ballVy = p.vy * 0.25;
+        this.ballCurl = 0; this.ballVSpin = 0;
         this.registerTouch(p);
       }
     }
@@ -1869,19 +2186,19 @@ class RetroKickScene extends Phaser.Scene {
     b.contactCool = 0; b.flickT = 0; b.planTouchId = this.touchId;
   }
 
+  /** Forward simulation with the SAME stepBall the game uses (curl, spin, bounces and the goal frame included). */
   private predictBall(maxT = 1.6): Sample[] {
-    let x = this.ball.x; let y = this.ball.y; let z = this.ballHeight;
-    let vx = this.ballVx; let vy = this.ballVy; let vz = this.ballVz;
+    const s: BallState = {
+      x: this.ball.x, y: this.ball.y, z: this.ballHeight,
+      vx: this.ballVx, vy: this.ballVy, vz: this.ballVz, curl: this.ballCurl, vspin: this.ballVSpin,
+    };
     const out: Sample[] = [];
     const dt = 1 / 60;
     for (let i = 1; i <= Math.round(maxT * 60); i++) {
-      x += vx * dt; y += vy * dt; z += vz * dt; vz -= 400 * dt;
-      if (z < 0) { z = 0; vz = vz < -30 ? vz * -0.4 : 0; }
-      const fk = Math.pow(z > 1 ? 0.997 : 0.986, dt * 60);
-      vx *= fk; vy *= fk;
-      out.push({ t: i * dt, x, y, z });
-      if (x < LINE || x > FIELD_W - LINE || y < LINE || y > FIELD_H - LINE) break;
-      if (Math.hypot(vx, vy) < 15) break;
+      stepBall(s, dt);
+      out.push({ t: i * dt, x: s.x, y: s.y, z: s.z });
+      if (s.x < LINE || s.x > FIELD_W - LINE || s.y < LINE || s.y > FIELD_H - LINE) break;
+      if (Math.hypot(s.vx, s.vy) < 15) break;
     }
     return out;
   }
@@ -2110,6 +2427,8 @@ class RetroKickScene extends Phaser.Scene {
     this.ballVx = (px / nl) * sp;
     this.ballVy = (py / nl) * sp;
     this.ballVz = vz;
+    this.ballCurl = Phaser.Math.FloatBetween(-0.4, 0.4);    // a parried ball leaves with a little spin
+    this.ballVSpin = 0;
     this.registerTouch(gk);
     this.possession = null;
     this.playSound('tackle');
@@ -2120,27 +2439,26 @@ class RetroKickScene extends Phaser.Scene {
   // ═══════════════ BALL PHYSICS & TOUCH TRACKING ═══════════════
 
   private updateBall(dt: number): void {
+    this.ballSquash = Math.max(0, this.ballSquash - dt * 8);
+
     if (this.gkHolder) {
       const gk = this.gkHolder;
       this.ball.setPosition(gk.sprite.x + (gk.side === 'home' ? 10 : -10), gk.sprite.y);
       this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
+      this.ballCurl = 0; this.ballVSpin = 0;
       return;
     }
 
-    this.ball.x += this.ballVx * dt;
-    this.ball.y += this.ballVy * dt;
-
-    this.ballHeight += this.ballVz * dt;
-    this.ballVz -= 400 * dt;
-    if (this.ballHeight < 0) {
-      this.ballHeight = 0;
-      this.ballVz = this.ballVz < -30 ? this.ballVz * -0.4 : 0;
-    }
-
-    const friction = this.ballHeight > 1 ? 0.997 : 0.986;
-    this.ballVx *= Math.pow(friction, dt * 60);
-    this.ballVy *= Math.pow(friction, dt * 60);
-    this.ballSpin += Math.hypot(this.ballVx, this.ballVy) * dt * 0.05;
+    const s: BallState = {
+      x: this.ball.x, y: this.ball.y, z: this.ballHeight,
+      vx: this.ballVx, vy: this.ballVy, vz: this.ballVz, curl: this.ballCurl, vspin: this.ballVSpin,
+    };
+    const ev = stepBall(s, dt);
+    this.ball.x = s.x; this.ball.y = s.y; this.ballHeight = s.z;
+    this.ballVx = s.vx; this.ballVy = s.vy; this.ballVz = s.vz;
+    this.ballCurl = s.curl; this.ballVSpin = s.vspin;
+    this.ballSpin += (Math.hypot(s.vx, s.vy) * 0.05 + Math.abs(s.curl) * 6) * dt;
+    this.handleBallEvent(ev);
 
     this.keeperContacts();
     if (this.gkHolder) return;
@@ -2152,12 +2470,26 @@ class RetroKickScene extends Phaser.Scene {
     this.handleBallContacts();
   }
 
+  private handleBallEvent(ev: BallEvent): void {
+    if (ev === 'bounce') {
+      this.ballSquash = 1;
+      if (LAST_IMPACT > 90) this.playSound('bounce');
+    } else if (ev === 'post' || ev === 'bar') {
+      this.playSound('post');
+      this.cameraShake = Math.max(this.cameraShake, 0.12);
+      this.touchId++;                                       // the keeper must re-read the ball
+      this.shotMissed();                                    // the shooter reacts: so close
+      this.setMessage(ev === 'post' ? '🥅 OFF THE POST!' : '🥅 OFF THE BAR!');
+    }
+  }
+
   private checkBoundaries(): boolean {
     if (this.state !== 'playing' || this.goalScored || this.kickoffLock > 0) return false;
     const decision = decideOutOfPlay(this.ball.x, this.ball.y, this.lastTouch, this.ballHeight);
     if (!decision) return false;
     const z = this.ballHeight;
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
+    this.ballCurl = 0; this.ballVSpin = 0;
     if (decision.kind === 'goal') {
       this.scoreGoal(decision.team);
     } else {
@@ -2184,11 +2516,12 @@ class RetroKickScene extends Phaser.Scene {
     this.possession = p.side;
     this.ballVx = 0;
     this.ballVy = 0;
+    this.ballCurl = 0; this.ballVSpin = 0;
     if (p.role === 'GK') { this.gkCatch(p); return; }
     this.carrier = p;
     this.carrierSince = this.time.now;
     this.thinkTimer = 0;
-    if (prev !== p.side) {                                   // possession changed: start a fast-break window if the tactic uses one
+    if (prev !== p.side) {
       const T = TACTICS[this.tactics[p.side]];
       if (T.counterMs > 0) this.counterUntil[p.side] = this.time.now + T.counterMs;
     }
@@ -2227,19 +2560,26 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
+  /** Physical deflection: the ball reflects off the contact surface, so WHERE it hits decides where it goes. */
   private deflect(p: Footballer, speed: number, keep: number, save: boolean): void {
     this.shotMissed();
     this.carrier = null;
-    const ang = Math.atan2(this.ball.y - p.sprite.y, this.ball.x - p.sprite.x);
-    let nx = Math.cos(ang) * 0.7 + (this.ballVx / speed) * 0.3;
-    let ny = Math.sin(ang) * 0.7 + (this.ballVy / speed) * 0.3;
+    let nx = this.ball.x - p.sprite.x;
+    let ny = this.ball.y - p.sprite.y;
     const nl = Math.hypot(nx, ny) || 1;
     nx /= nl; ny /= nl;
-    this.ballVx = nx * speed * keep;
-    this.ballVy = ny * speed * keep;
+    const inVx = this.ballVx; const inVy = this.ballVy;
+    const r = reflect(inVx, inVy, nx, ny, keep, 0.85);
+    let ox = r.x; let oy = r.y;
+    if (Math.hypot(ox, oy) < 60) { ox += nx * 60; oy += ny * 60; }   // never let it die against the player
+    this.ballVx = ox; this.ballVy = oy;
+    // a glancing blow puts spin on the ball
+    const vt = (inVx * -ny + inVy * nx) / (speed || 1);
+    this.ballCurl = Phaser.Math.Clamp(vt * 0.7, -0.6, 0.6);
+    this.ballVSpin = 0;
     this.ballVz = 20;
-    this.ball.x = p.sprite.x + Math.cos(ang) * (CONTACT_RADIUS + 2);
-    this.ball.y = p.sprite.y + Math.sin(ang) * (CONTACT_RADIUS + 2);
+    this.ball.x = p.sprite.x + nx * (CONTACT_RADIUS + 2);
+    this.ball.y = p.sprite.y + ny * (CONTACT_RADIUS + 2);
     this.registerTouch(p);
     p.cooldown = 0.3;
     this.possession = null;
@@ -2262,6 +2602,7 @@ class RetroKickScene extends Phaser.Scene {
     this.gkHoldTimer = 1.5 + Math.random() * 0.5;
     this.possession = gk.side;
     this.ballVx = 0; this.ballVy = 0;
+    this.ballCurl = 0; this.ballVSpin = 0;
     const b = gk.gk!;
     b.result = 'catch';
     b.flickT = 0.6;
@@ -2298,6 +2639,7 @@ class RetroKickScene extends Phaser.Scene {
         this.ball.y = carrier.sprite.y + Math.sin(carrier.facing) * 14;
         this.ballVx = carrier.vx * 0.22;
         this.ballVy = carrier.vy * 0.22;
+        this.ballCurl = 0; this.ballVSpin = 0;
         this.registerTouch(carrier);
       }
     }
@@ -2321,9 +2663,23 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ ACTIONS (open play) ═══════════════
 
-  /** X = pass to the best-placed teammate (scored like the CPU does), favouring the direction you are moving. */
+  /** Pass to a point: driven along the ground (speed scaled to distance) or lofted over defenders (lands on target). */
+  private playPass(c: Footballer, lead: Pt, lob: boolean, fast = false): void {
+    const d = dist(this.ball.x, this.ball.y, lead.x, lead.y);
+    const ang = Math.atan2(lead.y - this.ball.y, lead.x - this.ball.x);
+    if (lob) {
+      const l = solveLob(Phaser.Math.Clamp(d, 60, 380));
+      this.kickBall(Math.cos(ang) * l.speed, Math.sin(ang) * l.speed, c, l.vz, 'pass', { vspin: l.vspin });
+    } else {
+      const speed = Phaser.Math.Clamp(d * 1.35, 180, fast ? 360 : 330);
+      this.kickBall(Math.cos(ang) * speed, Math.sin(ang) * speed, c, 8, 'pass');
+    }
+  }
+
+  /** X = driven pass, C + X = lofted pass. Picks the best-scored teammate, favouring your movement direction. */
   private passBall(): void {
     if (this.gkHolder) return;
+    const lob = this.keys.C.isDown;
     const me = this.controlled;
     const mpos: Pt = { x: me.sprite.x, y: me.sprite.y };
     const T = TACTICS[this.tactics.home];
@@ -2333,34 +2689,59 @@ class RetroKickScene extends Phaser.Scene {
     for (const m of this.players) {
       if (m.side !== 'home' || m === me || m.role === 'GK') continue;
       const lead: Pt = { x: m.sprite.x + m.vx * 0.3, y: m.sprite.y + m.vy * 0.3 };
-      let s = scorePass(mpos, lead, 1, foePts, T);
+      let s = scorePass(mpos, lead, 1, foePts, T, lob);
       if (moving) s += 25 * Math.cos(Phaser.Math.Angle.Wrap(Math.atan2(lead.y - mpos.y, lead.x - mpos.x) - me.facing));
       if (!best || s > best.score) best = { m, lead, score: s };
     }
     if (!best) return;
-    const angle = Math.atan2(best.lead.y - this.ball.y, best.lead.x - this.ball.x);
-    this.kickBall(Math.cos(angle) * 260, Math.sin(angle) * 260, me, 10, 'pass');
+    this.playPass(me, best.lead, lob);
     this.passTarget = best.m;
     this.playSound('pass');
-    this.setMessage('→ Pass played');
+    this.setMessage(lob ? '↗ Lofted pass' : '→ Pass played');
   }
 
-  private shootBall(): void {
+  /**
+   * One routine for every shot, human or CPU. Power sets speed (260–520); a curled shot is solved by
+   * simulation so it bends onto the target; power shots are less accurate.
+   */
+  private takeShot(c: Footballer, targetY: number, power: number, high: boolean, curlOn: boolean): void {
+    const att = c.side === 'home' ? 1 : -1;
+    const goalX = att === 1 ? FIELD_W - LINE : LINE;
+    const p = Phaser.Math.Clamp(power, 0, 1);
+    const speed = lerp(260, 520, p);
+    const from: Pt = { x: this.ball.x, y: this.ball.y };
+    const lift = shotLiftFor(speed, Math.abs(goalX - from.x), high);
+    let aim = Math.atan2(targetY - from.y, goalX - from.x);
+    let curl = 0;
+    if (curlOn) {
+      curl = 0.9 * (targetY >= from.y ? 1 : -1) * att;      // bend toward the target side
+      aim = solveAim(from, { x: goalX, y: targetY }, speed, lift, curl, 0);
+    }
+    aim += (Math.random() - 0.5) * 2 * (0.01 + Math.max(0, p - 0.6) * 0.14);   // harder shots are wilder
+    this.kickBall(Math.cos(aim) * speed, Math.sin(aim) * speed, c, lift, 'shoot', { curl });
+  }
+
+  /** Hold Z to charge. Up/Down aims at a corner. C = high shot. V = curled shot. */
+  private shootBall(power: number): void {
     if (this.gkHolder) return;
-    const d = dist(this.controlled.sprite.x, this.controlled.sprite.y, this.ball.x, this.ball.y);
+    const me = this.controlled;
+    const d = dist(me.sprite.x, me.sprite.y, this.ball.x, this.ball.y);
     if (this.possession !== 'home' && d > 42) {
       this.setMessage('⚠ Get closer to shoot');
       return;
     }
     const high = this.keys.C.isDown;
-    const targetY = CENTER_Y + Phaser.Math.Between(-46, 46);
-    const angle = Math.atan2(targetY - this.ball.y, FIELD_W - 8 - this.ball.x);
-    const power = this.ball.x > FIELD_W * 0.65 ? 430 : 350;
-    const lift = shotLiftFor(power, FIELD_W - LINE - this.ball.x, high);
-    this.kickBall(Math.cos(angle) * power, Math.sin(angle) * power, this.controlled, lift, 'shoot');
+    const curl = this.keys.V.isDown;
+    const up = this.keys.W.isDown || this.keys.UP.isDown;
+    const down = this.keys.S.isDown || this.keys.DOWN.isDown;
+    const vIn = Number(down) - Number(up);
+    const targetY = CENTER_Y + (vIn !== 0 ? vIn * (GOAL_HALF - 12) + Phaser.Math.Between(-6, 6) : Phaser.Math.Between(-30, 30));
+    this.takeShot(me, targetY, power, high, curl);
     this.playSound('shoot');
-    this.setMessage(high ? '💥 HIGH SHOT!' : '💥 SHOT!');
-    this.cameraShake = 0.12;
+    this.setMessage(
+      (power > 0.85 ? '💥 POWER SHOT!' : power < 0.6 ? '⚽ Soft shot' : '💥 SHOT!') + (high ? ' (high)' : '') + (curl ? ' (curled)' : '')
+    );
+    this.cameraShake = 0.06 + 0.1 * power;
   }
 
   private tackle(): void {
@@ -2376,14 +2757,9 @@ class RetroKickScene extends Phaser.Scene {
     this.spawnDustParticles(me.sprite.x, me.sprite.y + 8);
 
     if (ballDist < 35 && this.possession === 'away') {
-      this.registerTouch(me);
-      this.possession = 'home';
-      this.carrier = me;
-      this.carrierSince = this.time.now;
+      this.knockLoose(me, opponent);                         // knocked free and contested, not handed over
       this.selectControlled();
-      this.ballVx *= -0.3;
-      this.ballVy *= -0.3;
-      this.setMessage('✓ Clean tackle!');
+      this.setMessage('✓ Clean tackle — the ball runs loose!');
     } else if (d < 37) {
       if (Phaser.Math.Between(0, 100) < 35) {
         this.awardFoul('home', opponent.sprite.x, opponent.sprite.y);
@@ -2395,12 +2771,16 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  private kickBall(vx: number, vy: number, kicker: Footballer, lift = 10, action?: ActionType): void {
+  /** Single choke point for every kick. spin = curl (sidespin) and vspin (topspin +, backspin −). */
+  private kickBall(vx: number, vy: number, kicker: Footballer, lift = 10, action?: ActionType, spin?: SpinSpec): void {
     this.gkHolder = null;
     this.carrier = null;
     this.ballVx = vx;
     this.ballVy = vy;
     this.ballVz = lift;
+    this.ballCurl = spin?.curl ?? 0;
+    this.ballVSpin = spin?.vspin ?? 0;
+    this.ballSquash = 0;
     this.possession = null;
     this.registerTouch(kicker);
     kicker.cooldown = 0.25;
@@ -2418,6 +2798,17 @@ class RetroKickScene extends Phaser.Scene {
     const dirIn = targetSide === 'home' ? 1 : -1;
     const goalX = targetSide === 'home' ? LINE : FIELD_W - LINE;
     const sx = goalX + dirIn * 300;
+    this.prepDemo();
+    this.ball.setPosition(sx, CENTER_Y);
+    const shooter = this.players.find((p) => p.side === attacker && p.role === 'FWD')!;
+    const ang = Math.atan2(targetY - CENTER_Y, goalX - sx);
+    const lift = z > 15 ? shotLiftFor(speed, 300, true) : 20;
+    this.kickBall(Math.cos(ang) * speed, Math.sin(ang) * speed, shooter, lift, 'shoot');
+    this.kickoffLock = 0.1;
+    this.setMessage(`Test shot at ${teamName(targetSide)} goal`);
+  }
+
+  private prepDemo(): void {
     this.paused = false;
     this.restart = null;
     this.state = 'playing';
@@ -2425,14 +2816,48 @@ class RetroKickScene extends Phaser.Scene {
     this.restartLabel.setText('');
     this.aimGfx.clear();
     this.players.forEach((p) => { if (p.gk) this.resetKeeper(p.gk); });
-    this.ball.setPosition(sx, CENTER_Y);
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
-    const shooter = this.players.find((p) => p.side === attacker && p.role === 'FWD')!;
-    const ang = Math.atan2(targetY - CENTER_Y, goalX - sx);
-    const lift = z > 15 ? shotLiftFor(speed, 300, true) : 20;
-    this.kickBall(Math.cos(ang) * speed, Math.sin(ang) * speed, shooter, lift, 'shoot');
+    this.ballCurl = 0; this.ballVSpin = 0;
+  }
+
+  /** Debug: fire one example of each kind of kick toward the away goal so the trajectories can be compared. */
+  private fireDemo(kind: string): void {
+    this.prepDemo();
+    const shooter = this.players.find((p) => p.side === 'home' && p.role === 'FWD')!;
+    const goalX = FIELD_W - LINE;
+    const place = (x: number, y: number): void => this.ball.setPosition(x, y);
+    switch (kind) {
+      case 'drivenPass': {
+        place(300, CENTER_Y);
+        this.kickBall(330, 0, shooter, 8, 'pass');
+        break;
+      }
+      case 'lobPass': {
+        place(300, CENTER_Y);
+        const l = solveLob(400);
+        this.kickBall(l.speed, 0, shooter, l.vz, 'pass', { vspin: l.vspin });
+        break;
+      }
+      case 'weakShot': place(580, CENTER_Y); this.takeShot(shooter, CENTER_Y + 25, 0.0, false, false); break;
+      case 'strongShot': place(580, CENTER_Y); this.takeShot(shooter, CENTER_Y + 25, 0.5, false, false); break;
+      case 'powerShot': place(580, CENTER_Y); this.takeShot(shooter, CENTER_Y + 25, 1.0, false, false); break;
+      case 'curlShot': place(640, 110); this.takeShot(shooter, CENTER_Y + 34, 0.7, false, true); break;
+      case 'post': {
+        place(600, CENTER_Y);
+        const ang = Math.atan2(CENTER_Y - GOAL_HALF - CENTER_Y, goalX - 600);
+        this.kickBall(Math.cos(ang) * 400, Math.sin(ang) * 400, shooter, 10, 'shoot');
+        break;
+      }
+      case 'bar': {
+        place(600, CENTER_Y);
+        const lift = solveLift({ x: 600, y: CENTER_Y }, 0, 420, GOAL_HEIGHT, goalX);
+        this.kickBall(420, 0, shooter, lift, 'shoot');
+        break;
+      }
+      default: this.setMessage('demo: drivenPass | lobPass | weakShot | strongShot | powerShot | curlShot | post | bar'); return;
+    }
     this.kickoffLock = 0.1;
-    this.setMessage(`Test shot at ${teamName(targetSide)} goal`);
+    this.setMessage(`Demo: ${kind}`);
   }
 
   // ═══════════════ FOULS ═══════════════
@@ -2464,6 +2889,7 @@ class RetroKickScene extends Phaser.Scene {
     this.gkHolder = null;
     this.indirectPending = null;
     this.shooter = null;
+    this.shotCharging = false;
     this.carrier = null;
     this.passTarget = null;
     this.oneTwo = null;
@@ -2472,6 +2898,7 @@ class RetroKickScene extends Phaser.Scene {
     this.thinkTimer = 0;
     this.possession = spec.team;
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
+    this.ballCurl = 0; this.ballVSpin = 0; this.ballSquash = 0;
     this.ball.setPosition(spec.x, spec.y);
     this.players.forEach((p) => { if (p.gk) this.resetKeeper(p.gk); });
 
@@ -2759,13 +3186,22 @@ class RetroKickScene extends Phaser.Scene {
       lift = shotLiftFor(speed, Math.abs(goalX - r.x), r.lofted);
     }
 
+    // Corners are whipped in: the curl bends the ball toward the goal
+    let spin: SpinSpec | undefined;
+    if (r.kind === 'corner') {
+      const ux = Math.cos(aim); const uy = Math.sin(aim);
+      const toGx = goalX - r.x; const toGy = CENTER_Y - r.y;
+      const sgn = Math.sign(-uy * toGx + ux * toGy) || 1;
+      spin = { curl: 0.45 * sgn };
+    }
+
     this.restart = null;
     this.state = 'playing';
     this.kickoffLock = 0.25;
     this.restartLabel.setText('');
     this.aimGfx.clear();
 
-    this.kickBall(vx, vy, r.taker, lift, action);
+    this.kickBall(vx, vy, r.taker, lift, action, spin);
     r.taker.cooldown = 1.0;
     this.indirectPending = info.indirect ? { team: r.team, taker: r.taker } : null;
     if (r.kind === 'penalty') this.keeperAnticipate(other(r.team));
@@ -2820,12 +3256,14 @@ class RetroKickScene extends Phaser.Scene {
     this.goalScored = true;
     this.shooter = null;
     this.carrier = null;
+    this.shotCharging = false;
     if (side === 'home') this.homeScore++; else this.awayScore++;
 
     this.state = 'goal';
     this.restart = null;
     this.gkHolder = null;
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
+    this.ballCurl = 0; this.ballVSpin = 0;
     this.ball.setPosition(FIELD_W / 2, FIELD_H / 2);
     this.restartLabel.setText('');
     this.aimGfx.clear();
@@ -2939,7 +3377,7 @@ class RetroKickScene extends Phaser.Scene {
     o.stop(t + dur);
   }
 
-  private playSound(type: 'kick' | 'pass' | 'shoot' | 'goal' | 'tackle'): void {
+  private playSound(type: 'kick' | 'pass' | 'shoot' | 'goal' | 'tackle' | 'post' | 'bounce'): void {
     if (!this.audioCtx) return;
     try {
       switch (type) {
@@ -2947,6 +3385,8 @@ class RetroKickScene extends Phaser.Scene {
         case 'pass': this.beep('triangle', 350, null, 0.08, 0.08); break;
         case 'shoot': this.beep('sawtooth', 180, 80, 0.15, 0.2); break;
         case 'tackle': this.beep('square', 120, null, 0.12, 0.06); break;
+        case 'post': this.beep('triangle', 620, 380, 0.2, 0.22); break;
+        case 'bounce': this.beep('sine', 150, 90, 0.07, 0.05); break;
         case 'goal': [523, 659, 784, 1047].forEach((f, i) => this.beep('square', f, null, 0.12, 0.25, i * 0.12)); break;
       }
     } catch (_e) { /* audio context may be suspended */ }
@@ -2967,6 +3407,7 @@ class RetroKickScene extends Phaser.Scene {
     this.cameraShake = 0;
     this.restartLabel.setText('');
     this.aimGfx.clear();
+    this.trail = [];
 
     this.homeScore = 0;
     this.awayScore = 0;
@@ -2980,6 +3421,7 @@ class RetroKickScene extends Phaser.Scene {
     this.indirectPending = null;
     this.gkHolder = null;
     this.shooter = null;
+    this.shotCharging = false;
     this.counterUntil = { home: 0, away: 0 };
     this.stats = { home: freshStats(), away: freshStats() };
     this.foulCount = { home: 0, away: 0 };
