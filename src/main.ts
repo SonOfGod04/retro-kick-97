@@ -342,7 +342,7 @@ function chooseSave(
   let bestD = Infinity;
   for (const s of samples) {
     if (behind(s.x)) continue;
-    if (s.t - react < MIN_DIVE_LEAD) continue;           // not enough time to get there
+    if (s.t - react < MIN_DIVE_LEAD) continue;           // not enough time to get 
     const d = Math.hypot(s.x - kx, s.y - ky);
     if (d < bestD) { bestD = d; best = s; }
   }
