@@ -17,7 +17,7 @@ const PENALTY_SPOT_X = 112;
 const SECOND_SPOT_X = 235;
 const FOUL_LIMIT = 5;
 const FOUR_SECONDS = 4;
-const CONTACT_RADIUS = 15;
+const CONTACT_RADIUS = 12;
 const SHADOW_DY = 6;
 
 // Goalkeeper physics
