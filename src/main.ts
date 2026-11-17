@@ -3362,21 +3362,6 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ SOUND ═══════════════
 
-  private beep(type: OscillatorType, f0: number, f1: number | null, gain: number, dur: number, delay = 0): void {
-    const ctx = this.audioCtx!;
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.connect(g); g.connect(ctx.destination);
-    o.type = type;
-    const t = ctx.currentTime + delay;
-    o.frequency.setValueAtTime(f0, t);
-    if (f1 !== null) o.frequency.exponentialRampToValueAtTime(f1, t + dur);
-    g.gain.setValueAtTime(gain, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    o.start(t);
-    o.stop(t + dur);
-  }
-
   private playSound(type: 'kick' | 'pass' | 'shoot' | 'goal' | 'tackle' | 'post' | 'bounce'): void {
     if (!this.audioCtx) return;
     try {
