@@ -3243,17 +3243,21 @@ class RetroKickScene extends Phaser.Scene {
       const pend = this.indirectPending;
       this.indirectPending = null;
       this.shotMissed();
+      this.audio.sfx('whistleShort');
       if (side === pend.team) {
         this.startRestart(clearanceSpec(other(side)));
+        this.banner('NO GOAL', 'Direct from an indirect restart', 0xffd23f, 1800, 4);
         this.setMessage('No goal — direct from an indirect restart · ' + this.restart!.baseMsg);
       } else {
         this.startRestart(cornerSpec(side, this.ball.y));
+        this.banner('NO GOAL', 'Own goal direct from restart — corner', 0xffd23f, 1800, 4);
         this.setMessage('Own goal direct from restart — corner · ' + this.restart!.baseMsg);
       }
       return;
     }
 
     this.goalScored = true;
+    if (this.shooter && this.shooter.side === side) this.stats[side].onTarget++;
     this.shooter = null;
     this.carrier = null;
     this.shotCharging = false;
@@ -3273,7 +3277,7 @@ class RetroKickScene extends Phaser.Scene {
     this.showGoalCelebration('GOAL!!!', `${teamLabel} SCORE!`);
     this.flashScreen(0xffffff, 0.7);
     this.cameraShake = 0.4;
-    this.playSound('goal');
+    this.reactGoal(side);
 
     const confettiX = side === 'home' ? FIELD_W * 0.75 : FIELD_W * 0.25;
     for (let i = 0; i < 50; i++) this.spawnConfetti(confettiX, FIELD_H / 2);
