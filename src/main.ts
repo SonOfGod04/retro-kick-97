@@ -1,9 +1,13 @@
 import Phaser from 'phaser';
 import './style.css';
+import { GameAudio } from './audio';
 
 // ═══════════════ CONSTANTS ═══════════════
 const FIELD_W = 900;
 const FIELD_H = 520;
+const STAND = 56;                         // height of each spectator stand (above and below the pitch)
+const GAME_H = FIELD_H + STAND * 2;       // the canvas is taller than the pitch to fit the arena
+const TUNNEL_Y = -72;                     // players enter from here (above the top stand, off-screen)
 const HALF_SECONDS = 120;
 const EXTRA_TIME_SECONDS = 60;
 const CENTER_X = FIELD_W / 2;
@@ -32,16 +36,16 @@ const BODY_R = 11;
 const GK_PREDICT_ERR = 6;
 
 // Ball physics (Phase 5)
-const G = 400;                   // gravity (px/s²)
-const MAGNUS = 0.6;              // curl strength
-const POST_R = 9;                // post radius + ball radius
+const G = 400;
+const MAGNUS = 0.6;
+const POST_R = 9;
 
 type TeamSide = 'home' | 'away';
-type GameState = 'playing' | 'restart' | 'goal' | 'fulltime';
+type GameState = 'intro' | 'playing' | 'restart' | 'goal' | 'halftime' | 'fulltime';
 type RestartKind =
   | 'kickoff' | 'kick-in' | 'corner' | 'goal-clearance'
   | 'free-kick' | 'indirect-free-kick' | 'penalty' | 'second-penalty';
-type ActionType = 'pass' | 'shoot' | 'throw' | 'tackle' | 'jump' | 'miss';
+type ActionType = 'pass' | 'shoot' | 'throw' | 'tackle' | 'jump' | 'miss' | 'point' | 'whistle' | 'raise';
 type SaveType = 'stand' | 'jump' | 'dive-low' | 'dive-high' | 'stretch';
 type GkMode = 'ready' | 'diving' | 'fallen' | 'recovering' | 'concede';
 type AnimName =
@@ -141,8 +145,14 @@ interface Restart extends RestartSpec {
 }
 
 interface TeamStats {
-  passes: number; shots: number; intercepts: number; tackles: number;
+  passes: number; passOk: number; shots: number; onTarget: number; saves: number;
+  intercepts: number; tackles: number; fouls: number; corners: number;
   poss: number; lineSum: number; lineN: number;
+}
+
+interface Entrance {
+  t: number; short: boolean; lineT: number; announced: boolean; done: () => void;
+  targets: Map<Footballer, { tx: number; ty: number; delay: number }>;
 }
 
 const RESTART_INFO: Record<RestartKind, {
@@ -190,12 +200,15 @@ const TACTIC_ORDER: Tactic[] = ['balanced', 'press', 'defensive', 'counter', 'po
 // ═══════════════ ANIMATION DATA (Phase 2) ═══════════════
 
 const ACTIONS: Record<ActionType, { dur: number; start: number }> = {
-  pass:   { dur: 0.34, start: 0.2 },
-  shoot:  { dur: 0.45, start: 0.3 },
-  throw:  { dur: 0.40, start: 0.15 },
-  tackle: { dur: 0.40, start: 0 },
-  jump:   { dur: 0.50, start: 0 },
-  miss:   { dur: 1.20, start: 0 },
+  pass:    { dur: 0.34, start: 0.2 },
+  shoot:   { dur: 0.45, start: 0.3 },
+  throw:   { dur: 0.40, start: 0.15 },
+  tackle:  { dur: 0.40, start: 0 },
+  jump:    { dur: 0.50, start: 0 },
+  miss:    { dur: 1.20, start: 0 },
+  point:   { dur: 1.40, start: 0 },   // referee signals (Phase 6)
+  whistle: { dur: 0.70, start: 0 },
+  raise:   { dur: 4.50, start: 0 },
 };
 
 const KF = {
@@ -272,6 +285,11 @@ function makeKit(side: TeamSide, role: Footballer['role'], number: number): Kit 
   };
 }
 
+const REF_KIT: Kit = {
+  jersey: 0xf2d300, jerseyDark: 0xb89c00, shorts: 0x111111, socks: 0x111111, boots: 0x111111,
+  skin: 0xd9a066, skinShade: 0xb98048, hair: 0x111111, glove: 0xd9a066, longSleeves: false,
+};
+
 // ═══════════════ PURE RULE FUNCTIONS (Phase 1) ═══════════════
 const other = (s: TeamSide): TeamSide => (s === 'home' ? 'away' : 'home');
 const teamName = (s: TeamSide): string => (s === 'home' ? 'Rockets' : 'Comets');
@@ -282,6 +300,7 @@ const clampPt = (x: number, y: number): Pt => ({
   x: Phaser.Math.Clamp(x, 31, FIELD_W - 31),
   y: Phaser.Math.Clamp(y, 31, FIELD_H - 31),
 });
+const hex = (c: number): string => '#' + c.toString(16).padStart(6, '0');
 
 function cornerSpec(attacker: TeamSide, ballY: number): RestartSpec {
   return {
@@ -337,11 +356,55 @@ function decideFoul(fouler: TeamSide, victimX: number, victimY: number, foulNumb
   return { kind: 'free-kick', team: fouled, x: p.x, y: p.y };
 }
 
+// ═══════════════ PURE PRESENTATION LOGIC (Phase 6) ═══════════════
+
+/** 125 -> "02:05" */
+function formatClock(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** Whole-number possession percentages that always add up to 100. */
+function possessionPct(h: number, a: number): [number, number] {
+  const tot = h + a;
+  if (tot <= 0) return [50, 50];
+  const ph = Math.round((100 * h) / tot);
+  return [ph, 100 - ph];
+}
+
+function passAccuracy(ok: number, total: number): number {
+  return total <= 0 ? 0 : Math.round((100 * ok) / total);
+}
+
+/** Crowd excitement relaxes back to its baseline: a spike fades slowly, a lull recovers quickly. */
+function nextExcite(cur: number, base: number, dt: number): number {
+  return cur > base ? cur - (cur - base) * (1 - Math.exp(-dt * 0.55)) : cur + (base - cur) * (1 - Math.exp(-dt * 2));
+}
+
+/** Accumulated-foul pips: five fill up, the 6th and later turn them red (10 m free kick territory). */
+function pips(fouls: number): { filled: number; red: boolean } {
+  return { filled: Math.min(5, fouls), red: fouls > FOUL_LIMIT };
+}
+
+/** Where a player stands in the pre-match line-up (home column left of the halfway line, away right). */
+function lineupSpot(side: TeamSide, i: number): Pt {
+  return { x: CENTER_X + (side === 'home' ? -62 : 62), y: CENTER_Y + (i - 3) * 50 };
+}
+
+/** The referee keeps an arm raised during play after an indirect free kick, until another player touches the ball. */
+function refKeepsArmUp(kind: RestartKind): boolean {
+  return kind === 'indirect-free-kick';
+}
+
+/** A higher-priority banner is never covered by a lower one while it is showing. */
+function bannerAllowed(now: number, until: number, curPrio: number, prio: number): boolean {
+  return now >= until || prio >= curPrio;
+}
+
 // ═══════════════ PURE BALL PHYSICS (Phase 5) ═══════════════
 
-let LAST_IMPACT = 0;   // vertical speed of the most recent bounce (for sound)
+let LAST_IMPACT = 0;
 
-/** Geometry helper: distance from p to segment a–b and where along it (t in 0..1). */
 function distToSegment(p: Pt, a: Pt, b: Pt): { d: number; t: number } {
   const abx = b.x - a.x;
   const aby = b.y - a.y;
@@ -351,7 +414,6 @@ function distToSegment(p: Pt, a: Pt, b: Pt): { d: number; t: number } {
   return { d: Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t)), t };
 }
 
-/** Bounce a velocity off a surface with unit normal n: e = restitution, tf = tangential speed kept. */
 function reflect(vx: number, vy: number, nx: number, ny: number, e: number, tf: number): Pt {
   const vn = vx * nx + vy * ny;
   if (vn >= 0) return { x: vx, y: vy };
@@ -360,11 +422,9 @@ function reflect(vx: number, vy: number, nx: number, ny: number, e: number, tf: 
   return { x: tx * tf - e * vn * nx, y: ty * tf - e * vn * ny };
 }
 
-/** Posts (vertical poles) and crossbar of both goals. Swept test, so fast shots cannot tunnel. */
 function collideGoal(s: BallState, x0: number, y0: number, z0: number): BallEvent {
   for (const gl of [LINE, FIELD_W - LINE]) {
-    const sideIn = gl === LINE ? 1 : -1;                         // direction pointing into the field
-    // Crossbar: the ball crosses the goal-line plane at bar height
+    const sideIn = gl === LINE ? 1 : -1;
     const cameFromField = (x0 - gl) * sideIn > 0;
     if (cameFromField && (s.x - gl) * sideIn <= 0) {
       const t = (gl - x0) / (s.x - x0 || 1e-9);
@@ -377,7 +437,6 @@ function collideGoal(s: BallState, x0: number, y0: number, z0: number): BallEven
         return 'bar';
       }
     }
-    // Posts
     if (s.z < GOAL_HEIGHT) {
       for (const py of [CENTER_Y - GOAL_HALF, CENTER_Y + GOAL_HALF]) {
         const sg = distToSegment({ x: gl, y: py }, { x: x0, y: y0 }, { x: s.x, y: s.y });
@@ -399,11 +458,6 @@ function collideGoal(s: BallState, x0: number, y0: number, z0: number): BallEven
   return 'none';
 }
 
-/**
- * One physics step of the ball. Used by the game AND by every predictor/solver, so predictions match reality.
- * Gravity, air drag (speed dependent), rolling friction (the ball comes to rest), restitution with speed loss,
- * curl (Magnus), topspin/backspin, and the goal frame.
- */
 function stepBall(s: BallState, dt: number): BallEvent {
   const sp0 = Math.hypot(s.vx, s.vy);
   if (s.curl !== 0 && sp0 > 30) {
@@ -418,7 +472,7 @@ function stepBall(s: BallState, dt: number): BallEvent {
 
   const x0 = s.x; const y0 = s.y; const z0 = s.z;
   const airborne = s.z > 0.01 || s.vz > 0;
-  const g = airborne ? G * (1 + 0.35 * s.vspin) : G;          // topspin dips, backspin floats
+  const g = airborne ? G * (1 + 0.35 * s.vspin) : G;
   s.x += s.vx * dt;
   s.y += s.vy * dt;
   s.z += s.vz * dt;
@@ -430,8 +484,8 @@ function stepBall(s: BallState, dt: number): BallEvent {
     s.z = 0;
     if (s.vz < -25) {
       LAST_IMPACT = -s.vz;
-      s.vz = -s.vz * 0.45;                                       // futsal ball: low bounce
-      const hf = Phaser.Math.Clamp(0.88 + 0.12 * s.vspin, 0.6, 1.05);   // backspin checks, topspin kicks on
+      s.vz = -s.vz * 0.45;
+      const hf = Phaser.Math.Clamp(0.88 + 0.12 * s.vspin, 0.6, 1.05);
       s.vx *= hf; s.vy *= hf;
       s.vspin *= 0.4;
       ev = 'bounce';
@@ -442,13 +496,13 @@ function stepBall(s: BallState, dt: number): BallEvent {
 
   const sp = Math.hypot(s.vx, s.vy);
   if (s.z > 1) {
-    const f = Math.exp(-(0.10 + 0.0002 * sp) * dt);              // air drag grows with speed
+    const f = Math.exp(-(0.10 + 0.0002 * sp) * dt);
     s.vx *= f; s.vy *= f;
   } else {
-    const f = Math.exp(-0.846 * dt);                             // rolling friction
+    const f = Math.exp(-0.846 * dt);
     s.vx *= f; s.vy *= f;
     const sp2 = Math.hypot(s.vx, s.vy);
-    const ns = Math.max(0, sp2 - 12 * dt);                       // plus a constant term so it really stops
+    const ns = Math.max(0, sp2 - 12 * dt);
     const k = sp2 > 0 ? ns / sp2 : 0;
     s.vx *= k; s.vy *= k;
   }
@@ -458,7 +512,6 @@ function stepBall(s: BallState, dt: number): BallEvent {
   return ev;
 }
 
-/** Fly a kick and report where it crosses a goal line (x = lineX). */
 function simulateToLine(
   from: Pt, angle: number, speed: number, lift: number, curl: number, vspin: number, lineX: number, maxT = 2
 ): { y: number; z: number; t: number } | null {
@@ -477,7 +530,6 @@ function simulateToLine(
   return null;
 }
 
-/** Find the kick angle so a (possibly curled) shot crosses the line at target.y. */
 function solveAim(from: Pt, target: Pt, speed: number, lift: number, curl: number, vspin: number): number {
   let a = Math.atan2(target.y - from.y, target.x - from.x);
   const dxAbs = Math.abs(target.x - from.x) || 1;
@@ -492,7 +544,6 @@ function solveAim(from: Pt, target: Pt, speed: number, lift: number, curl: numbe
   return a;
 }
 
-/** Scan for the lift that makes a shot arrive at a given height (used by the debug demos). */
 function solveLift(from: Pt, angle: number, speed: number, targetZ: number, lineX: number): number {
   let best = 20;
   let bestErr = Infinity;
@@ -514,7 +565,6 @@ function lobLanding(v: number, vz: number, vspin: number): number {
   return s.x - x0;
 }
 
-/** A lofted pass: backspin so it holds up and checks on landing, tuned by simulation to land d px away. */
 function solveLob(d: number): { speed: number; vz: number; vspin: number } {
   const vspin = -0.6;
   const gEff = G * (1 + 0.35 * vspin);
@@ -624,7 +674,6 @@ function laneBlocked(a: Pt, b: Pt, opps: Pt[], radius: number): boolean {
   return false;
 }
 
-/** Value of a pass (higher is better). lob = a lofted pass: it flies over the lane but is less precise. */
 function scorePass(from: Pt, to: Pt, att: number, opps: Pt[], T: TacticParams, lob = false): number {
   const goalX = att === 1 ? FIELD_W - LINE : LINE;
   const d = Math.hypot(to.x - from.x, to.y - from.y);
@@ -697,7 +746,7 @@ function shapeTarget(slot: Slot, side: TeamSide, phase: Phase, tactic: Tactic, b
   return clampPt(x, y);
 }
 
-/** Run with ?selftest in the URL — logs the Phase 1–5 pure-logic tests. */
+/** Run with ?selftest in the URL — logs the Phase 1–6 pure-logic tests. */
 function runSelfTests(): void {
   const results: [string, boolean][] = [];
   const t = (name: string, ok: boolean) => results.push([name, ok]);
@@ -867,6 +916,34 @@ function runSelfTests(): void {
   const lobScore = scorePass({ x: 400, y: 260 }, { x: 600, y: 260 }, 1, [{ x: 500, y: 260 }], TACTICS.balanced, true);
   const driveScore = scorePass({ x: 400, y: 260 }, { x: 600, y: 260 }, 1, [{ x: 500, y: 260 }], TACTICS.balanced, false);
   t('P5 a lofted pass is valued over a blocked driven pass', lobScore > driveScore + 30);
+  // ── Phase 6
+  t('P6 match clock formats minutes and seconds', formatClock(125) === '02:05' && formatClock(0) === '00:00' && formatClock(60) === '01:00');
+  const pp = possessionPct(3, 1);
+  t('P6 possession percentages add up to 100', pp[0] + pp[1] === 100 && pp[0] === 75 && possessionPct(0, 0)[0] === 50);
+  t('P6 pass accuracy handles zero passes', passAccuracy(0, 0) === 0 && passAccuracy(3, 4) === 75);
+  let ex = 1.2;
+  for (let n = 0; n < 180; n++) ex = nextExcite(ex, 0.3, 1 / 60);
+  t('P6 crowd excitement fades after a spike but never below its baseline', ex < 0.75 && ex >= 0.3);
+  let lull = 0.0;
+  for (let n = 0; n < 120; n++) lull = nextExcite(lull, 0.4, 1 / 60);
+  t('P6 crowd excitement rises quickly to a new baseline', lull > 0.3 && lull <= 0.4);
+  t('P6 foul pips fill up to five, then turn red', pips(3).filled === 3 && !pips(3).red && pips(5).filled === 5 && !pips(5).red && pips(6).red);
+  const hs = lineupSpot('home', 2); const as = lineupSpot('away', 2);
+  t('P6 line-up puts the teams on opposite sides of the halfway line', hs.x < CENTER_X && as.x > CENTER_X && hs.y === as.y);
+  const ys = new Set([0, 1, 2, 3, 4, 5, 6].map((n) => lineupSpot('home', n).y));
+  t('P6 line-up spots are distinct and on the pitch', ys.size === 7 && [...ys].every((y) => y > 31 && y < FIELD_H - 31));
+  t('P6 the referee keeps an arm up only for indirect free kicks', refKeepsArmUp('indirect-free-kick') && !refKeepsArmUp('free-kick') && !refKeepsArmUp('corner'));
+  t('P6 a lower-priority banner cannot cover a goal banner', !bannerAllowed(100, 500, 5, 1) && bannerAllowed(600, 500, 5, 1) && bannerAllowed(100, 500, 1, 5));
+  const au = new GameAudio(false);
+  au.setVolume(2);
+  const v1 = au.volume;
+  au.setVolume(-1);
+  const v0 = au.volume;
+  au.toggleMute();
+  t('P6 audio volume is clamped and mute is reported', v1 === 1 && v0 === 0 && au.muted && au.status().includes('MUTED'));
+  au.toggleMute();
+  au.setVolume(0.5);
+  t('P6 audio status shows the volume once unmuted', !au.muted && au.status().includes('VOL 50%'));
   const failed = results.filter((r) => !r[1]);
   results.forEach(([n, ok]) => console.log(`${ok ? '✅' : '❌'} ${n}`));
   console.log(failed.length === 0 ? `SELF-TEST: all ${results.length} passed` : `SELF-TEST: ${failed.length} FAILED`);
@@ -881,11 +958,16 @@ interface GkPose {
   head?: Pt;
 }
 
-const freshStats = (): TeamStats => ({ passes: 0, shots: 0, intercepts: 0, tackles: 0, poss: 0, lineSum: 0, lineN: 0 });
+const freshStats = (): TeamStats => ({
+  passes: 0, passOk: 0, shots: 0, onTarget: 0, saves: 0, intercepts: 0, tackles: 0,
+  fouls: 0, corners: 0, poss: 0, lineSum: 0, lineN: 0,
+});
 
 // ═══════════════ SCENE ═══════════════
 class RetroKickScene extends Phaser.Scene {
   private players: Footballer[] = [];
+  private referee!: Footballer;
+  private audio!: GameAudio;
   private ball!: Phaser.GameObjects.Arc;
   private ballVis!: Phaser.GameObjects.Arc;
   private ballInner!: Phaser.GameObjects.Arc;
@@ -903,6 +985,7 @@ class RetroKickScene extends Phaser.Scene {
   private ballSpin = 0;
   private possession: TeamSide | null = 'home';
   private lastTouch: TeamSide = 'home';
+  private lastToucher: Footballer | null = null;
   private touchId = 0;
   private controlled!: Footballer;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
@@ -915,24 +998,26 @@ class RetroKickScene extends Phaser.Scene {
   private pauseKeyHeld = false;
   private ended = false;
   private kickoffLock = 0;
-  private state: GameState = 'restart';
+  private state: GameState = 'intro';
   private goalScored = false;
   private message = 'Ready for kick-off';
   private openingKickoff: TeamSide = 'home';
 
   private restart: Restart | null = null;
-  private indirectPending: { team: TeamSide; taker: Footballer } | null = null;
+  private indirectPending: { team: TeamSide; taker: Footballer; kind: RestartKind } | null = null;
   private foulCount: Record<TeamSide, number> = { home: 0, away: 0 };
   private gkHolder: Footballer | null = null;
   private gkHoldTimer = 0;
   private goalTimer?: Phaser.Time.TimerEvent;
   private restartLabel!: Phaser.GameObjects.Text;
   private aimGfx!: Phaser.GameObjects.Graphics;
+  private markerGfx!: Phaser.GameObjects.Graphics;
 
   private shooter: Footballer | null = null;
   private shooterUntil = 0;
   private shotCharging = false;
   private shotPower = 0.5;
+  private pendingPass: { side: TeamSide; kicker: Footballer } | null = null;
 
   private tactics: Record<TeamSide, Tactic> = { home: 'balanced', away: 'balanced' };
   private carrier: Footballer | null = null;
@@ -947,6 +1032,39 @@ class RetroKickScene extends Phaser.Scene {
   private predAt = -1000;
   private stats: Record<TeamSide, TeamStats> = { home: freshStats(), away: freshStats() };
   private tacticText!: Phaser.GameObjects.Text;
+  private audioText!: Phaser.GameObjects.Text;
+
+  // Phase 6: arena, crowd, presentation
+  private crowdRows: { g: Phaser.GameObjects.Graphics; side: TeamSide; phase: number }[] = [];
+  private flagSpots: { x: number; y: number; side: TeamSide; ph: number }[] = [];
+  private flagGfx!: Phaser.GameObjects.Graphics;
+  private flashGfx!: Phaser.GameObjects.Graphics;
+  private flashes: { x: number; y: number; life: number }[] = [];
+  private excite: Record<TeamSide, number> = { home: 0.2, away: 0.2 };
+  private crowdAudioT = 0;
+  private entrance: Entrance | null = null;
+  private halftimeT = 0;
+  private sbHomeName!: Phaser.GameObjects.Text;
+  private sbAwayName!: Phaser.GameObjects.Text;
+  private sbHomeScore!: Phaser.GameObjects.Text;
+  private sbAwayScore!: Phaser.GameObjects.Text;
+  private sbClock!: Phaser.GameObjects.Text;
+  private sbPeriod!: Phaser.GameObjects.Text;
+  private sbLive!: Phaser.GameObjects.Text;
+  private sbPips!: Phaser.GameObjects.Graphics;
+  private sbPipsKey = '';
+  private bannerBg!: Phaser.GameObjects.Rectangle;
+  private bannerTitle!: Phaser.GameObjects.Text;
+  private bannerSub!: Phaser.GameObjects.Text;
+  private bannerUntil = 0;
+  private bannerPrio = 0;
+  private bannerToken = 0;
+  private panelItems: Phaser.GameObjects.GameObject[] = [];
+  private panelTitle!: Phaser.GameObjects.Text;
+  private panelScore!: Phaser.GameObjects.Text;
+  private panelSub!: Phaser.GameObjects.Text;
+  private panelHint!: Phaser.GameObjects.Text;
+  private panelRows: { label: Phaser.GameObjects.Text; h: Phaser.GameObjects.Text; a: Phaser.GameObjects.Text }[] = [];
 
   private goalText!: Phaser.GameObjects.Text;
   private goalSubText!: Phaser.GameObjects.Text;
@@ -959,19 +1077,25 @@ class RetroKickScene extends Phaser.Scene {
   private clockEl!: HTMLElement | null;
   private periodEl!: HTMLElement | null;
   private statusEl!: HTMLElement | null;
-  private audioCtx?: AudioContext;
 
   constructor() {
     super('RetroKickScene');
   }
 
   create(): void {
+    this.cameras.main.setScroll(0, -STAND);            // world y=0 is the top touchline; the stands sit above and below
+    this.audio = new GameAudio();
     this.drawPitch();
+    this.createArena();
     this.createTeams();
+    this.createReferee();
     this.createBall();
     this.createOverlays();
+    this.createScoreboard();
+    this.createBanner();
+    this.createPanel();
     this.keys = this.input.keyboard!.addKeys(
-      'W,A,S,D,UP,DOWN,LEFT,RIGHT,X,Z,C,V,SPACE,SHIFT,P,ENTER,T,G'
+      'W,A,S,D,UP,DOWN,LEFT,RIGHT,X,Z,C,V,SPACE,SHIFT,P,ENTER,T,G,M,N,OPEN_BRACKET,CLOSED_BRACKET'
     ) as Record<string, Phaser.Input.Keyboard.Key>;
     this.homeScoreEl = document.getElementById('home-score');
     this.awayScoreEl = document.getElementById('away-score');
@@ -980,13 +1104,14 @@ class RetroKickScene extends Phaser.Scene {
     this.statusEl = document.getElementById('status-message');
     this.hint = document.getElementById('canvas-hint');
     this.input.on('pointerdown', () => {
-      if (!this.audioCtx) {
-        this.audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
+      this.audio.unlock();
+      const wasPaused = this.paused;
       if (this.ended) this.resetMatch();
       this.paused = false;
       if (this.hint) this.hint.style.display = 'none';
-      this.setMessage(this.restart ? this.restart.baseMsg : 'Play on!');
+      if (wasPaused && this.state === 'intro') this.hidePanel();     // first click: leave the title card
+      else if (!wasPaused) this.skipPresentation();                  // later clicks skip entrances / the half-time break
+      if (this.state === 'playing' || this.state === 'restart') this.setMessage(this.restart ? this.restart.baseMsg : 'Play on!');
     });
     document.getElementById('restart-button')?.addEventListener('click', () => this.resetMatch());
 
@@ -995,10 +1120,11 @@ class RetroKickScene extends Phaser.Scene {
     this.tactics.away = fromUrl(qs.get('tactic')) ?? 'balanced';
     this.tactics.home = fromUrl(qs.get('home')) ?? 'balanced';
     this.updateTacticLabel();
+    this.audioText.setText(this.audio.status());
 
     // Debug hooks (only with ?selftest)
-    //   retroKickDebug.demo('drivenPass' | 'lobPass' | 'weakShot' | 'strongShot' | 'powerShot' | 'curlShot' | 'post' | 'bar')
-    //   retroKickDebug.shot('away', 230, 4) · retroKickDebug.tactic('away','press') · retroKickDebug.stats() · retroKickDebug.act(5,'shoot')
+    //   retroKickDebug.react('goal'|'save'|'post'|'foul'|'penalty'|'miss'|'applause')  -> hear and see a crowd reaction
+    //   retroKickDebug.demo('post'|'bar'|...) · shot('away',230,4) · tactic('away','press') · stats() · act(5,'shoot')
     if (qs.has('selftest')) {
       (window as any).retroKickDebug = {
         players: this.players,
@@ -1007,38 +1133,43 @@ class RetroKickScene extends Phaser.Scene {
         tactic: (side: TeamSide, name: Tactic) => this.cycleTactic(side, name),
         stats: () => this.statsSummary(),
         demo: (kind: string) => this.fireDemo(kind),
+        react: (kind: string) => this.debugReact(kind),
       };
     }
 
     this.selectControlled();
-    this.startKickoff(this.openingKickoff);
+    this.startEntrance(false, () => this.startKickoff(this.openingKickoff));
+    this.showPanel("RETRO KICK '97", 'FUTSAL · Rockets vs Comets', 'CLICK TO START', false);
     this.updateHud();
   }
 
-  // ═══════════════ GRAPHICS ═══════════════
+  // ═══════════════ ARENA ═══════════════
 
   private drawPitch(): void {
     const g = this.add.graphics();
     g.setDepth(0);
 
-    for (let i = 0; i < 12; i++) {
-      const shade = i % 2 === 0 ? 0x1f7a52 : 0x1a6846;
-      g.fillStyle(shade, 1);
-      g.fillRect(i * (FIELD_W / 12), 0, FIELD_W / 12, FIELD_H);
-    }
+    // dark surround (also the back of the stands)
+    g.fillStyle(0x0b0f15, 1).fillRect(0, -STAND, FIELD_W, GAME_H);
 
-    g.fillStyle(0x3a3a3a, 1);
-    g.fillRect(0, 0, FIELD_W, 10);
-    g.fillRect(0, FIELD_H - 10, FIELD_W, 10);
-    for (let i = 0; i < FIELD_W; i += 6) {
-      const topColor = Phaser.Math.Between(0, 1) ? 0xffd166 : 0xef476f;
-      g.fillStyle(topColor, 0.6);
-      g.fillRect(i, 2, 4, 6);
-      const bottomColor = Phaser.Math.Between(0, 1) ? 0x06d6a0 : 0x118ab2;
-      g.fillStyle(bottomColor, 0.6);
-      g.fillRect(i, FIELD_H - 8, 4, 6);
+    // parquet floor
+    const woods = [0xc68b4f, 0xbd8147, 0xca9156, 0xc1864b];
+    for (let i = 0; i < 30; i++) {
+      g.fillStyle(woods[i % 4], 1).fillRect(i * 30, 0, 30, FIELD_H);
+      g.fillStyle(0x8a5a2b, 0.35).fillRect(i * 30, 0, 1.5, FIELD_H);
+      for (let y = (i % 3) * 60; y < FIELD_H; y += 180) g.fillStyle(0x8a5a2b, 0.25).fillRect(i * 30, y, 30, 1.5);
     }
+    // soft floor reflections of the arena lights
+    g.fillStyle(0xffffff, 0.035);
+    [[150, 130], [450, 130], [750, 130], [150, 390], [450, 390], [750, 390]].forEach(([x, y]) => g.fillEllipse(x, y, 260, 120));
 
+    // painted futsal areas
+    g.fillStyle(0x2f6fb8, 0.5);
+    g.fillRect(19, 135, 118, 250);
+    g.fillRect(FIELD_W - 137, 135, 118, 250);
+    g.fillStyle(0x2f6fb8, 0.22).fillCircle(FIELD_W / 2, FIELD_H / 2, 67);
+
+    // lines
     g.lineStyle(3, 0xffffff, 0.95);
     g.strokeRect(19, 19, FIELD_W - 38, FIELD_H - 38);
     g.lineBetween(FIELD_W / 2, 19, FIELD_W / 2, FIELD_H - 19);
@@ -1063,6 +1194,20 @@ class RetroKickScene extends Phaser.Scene {
     g.beginPath(); g.arc(FIELD_W - 19, 19, cr, Math.PI / 2, Math.PI); g.strokePath();
     g.beginPath(); g.arc(19, FIELD_H - 19, cr, -Math.PI / 2, 0); g.strokePath();
     g.beginPath(); g.arc(FIELD_W - 19, FIELD_H - 19, cr, Math.PI, 1.5 * Math.PI); g.strokePath();
+
+    // LED advertising boards along both touchlines
+    const adColors = [0x1f6feb, 0xd23f31, 0xe2b007, 0x0a9d6b];
+    const adText = ["RETRO KICK '97", 'FUTSAL LEAGUE', 'GOAL!', 'LAGOS ARENA'];
+    for (const top of [true, false]) {
+      const by = top ? 0 : FIELD_H - 12;
+      g.fillStyle(0x0d1218, 1).fillRect(0, by, FIELD_W, 12);
+      for (let i = 0; i < 8; i++) {
+        g.fillStyle(adColors[i % 4], 1).fillRect(i * 112 + 3, by + 2, 106, 8);
+        this.add.text(i * 112 + 56, by + 6, adText[i % 4], {
+          fontFamily: 'Arial Black, sans-serif', fontSize: '7px', color: '#ffffff',
+        }).setOrigin(0.5).setDepth(4);
+      }
+    }
 
     this.drawGoal(g, 0, FIELD_H / 2 - 52, true);
     this.drawGoal(g, FIELD_W - 22, FIELD_H / 2 - 52, false);
@@ -1091,9 +1236,509 @@ class RetroKickScene extends Phaser.Scene {
     flag.fillStyle(0xffd23f, 1).fillTriangle(x, y - 14, x + 8, y - 11, x, y - 8);
   }
 
+  /** Two stands of about 400 spectators each. Home fans (blue) left, away fans (red) right. */
+  private createArena(): void {
+    const homeShirts = [0x2d7fff, 0x0a4fb5, 0xffffff, 0x5aa0ff];
+    const awayShirts = [0xff3b47, 0xb01822, 0xffffff, 0xff7a82];
+    const neutral = [0xffd23f, 0x222222, 0x06d6a0];
+    for (const top of [true, false]) {
+      const y0 = top ? -STAND : FIELD_H;
+      const wall = this.add.graphics().setDepth(1);
+      wall.fillStyle(0x0b0f15, 1).fillRect(0, y0, FIELD_W, STAND);
+      for (let r = 0; r < 4; r++) {
+        const yy = top ? -STAND + 6 + r * 11 : FIELD_H + 6 + r * 11;
+        wall.fillStyle(0x151c27 + r * 0x050607, 1).fillRect(0, yy, FIELD_W, 10);
+        wall.fillStyle(0x0b0f15, 1).fillRect(0, yy + 10, FIELD_W, 1);
+      }
+      for (let x = 90; x < FIELD_W; x += 180) wall.fillStyle(0x0b0f15, 1).fillRect(x, y0, 3, STAND);
+
+      for (let r = 0; r < 4; r++) {
+        const rowY = top ? -STAND + 14 + r * 11 : FIELD_H + 14 + r * 11;
+        const depth = top ? 2 + r * 0.1 : 2 + (3 - r) * 0.1;
+        const front = top ? r === 3 : r === 0;
+        for (const side of ['home', 'away'] as TeamSide[]) {
+          const g = this.add.graphics().setDepth(depth);
+          const x0 = side === 'home' ? 5 : CENTER_X + 5;
+          const x1 = side === 'home' ? CENTER_X - 5 : FIELD_W - 5;
+          for (let x = x0; x < x1; x += 9) {
+            const fx = x + Phaser.Math.FloatBetween(-1.2, 1.2);
+            const shirts = side === 'home' ? homeShirts : awayShirts;
+            const shirt = Math.random() < 0.14 ? neutral[Phaser.Math.Between(0, neutral.length - 1)] : shirts[Phaser.Math.Between(0, shirts.length - 1)];
+            g.fillStyle(shirt, 1).fillRect(fx - 2.6, rowY, 5.2, 7);
+            g.fillStyle(SKINS[Phaser.Math.Between(0, SKINS.length - 1)][0], 1).fillCircle(fx, rowY - 2.6, 2.5);
+          }
+          this.crowdRows.push({ g, side, phase: r * 0.9 + (top ? 0 : 1.7) + (side === 'home' ? 0 : 0.4) });
+          if (front) {
+            for (let k = 0; k < 5; k++) {
+              this.flagSpots.push({ x: Phaser.Math.Between(x0 + 10, x1 - 10), y: rowY - 5, side, ph: Math.random() * 6 });
+            }
+          }
+        }
+      }
+    }
+    this.flagGfx = this.add.graphics().setDepth(3);
+    this.flashGfx = this.add.graphics().setDepth(3.5);
+  }
+
+  // ═══════════════ CROWD ═══════════════
+
+  private bumpCrowd(side: TeamSide | 'both', amount: number): void {
+    if (side === 'both' || side === 'home') this.excite.home = Math.min(1.4, this.excite.home + amount);
+    if (side === 'both' || side === 'away') this.excite.away = Math.min(1.4, this.excite.away + amount);
+  }
+
+  private flashBurst(n: number): void {
+    for (let i = 0; i < n; i++) {
+      const top = Math.random() < 0.5;
+      this.flashes.push({
+        x: Phaser.Math.Between(10, FIELD_W - 10),
+        y: top ? Phaser.Math.Between(-STAND + 8, -8) : Phaser.Math.Between(FIELD_H + 8, FIELD_H + STAND - 8),
+        life: Phaser.Math.FloatBetween(0.1, 0.35),
+      });
+    }
+  }
+
+  private updateCrowd(dt: number): void {
+    const t = this.time.now / 1000;
+    // baseline excitement: attacks near a goal raise the noise
+    let base = 0.2;
+    if (this.state === 'playing') {
+      const dl = Math.hypot(this.ball.x - LINE, this.ball.y - CENTER_Y);
+      const dr = Math.hypot(FIELD_W - LINE - this.ball.x, this.ball.y - CENTER_Y);
+      base += Math.max(0, 1 - Math.min(dl, dr) / 320) * 0.35;
+    }
+    this.excite.home = nextExcite(this.excite.home, base, dt);
+    this.excite.away = nextExcite(this.excite.away, base, dt);
+
+    for (const row of this.crowdRows) {
+      const e = this.excite[row.side];
+      const amp = 0.3 + 3.4 * e;
+      row.g.y = -Math.abs(Math.sin(t * (2.2 + e * 4) + row.phase)) * amp;   // fans bob; at high excitement they jump
+    }
+
+    // waving flags
+    const fg = this.flagGfx;
+    fg.clear();
+    for (const f of this.flagSpots) {
+      const e = this.excite[f.side];
+      const wave = Math.sin(t * (3 + e * 6) + f.ph) * (2 + e * 4);
+      const col = f.side === 'home' ? 0x2d7fff : 0xff3b47;
+      fg.lineStyle(1, 0xdddddd, 1).lineBetween(f.x, f.y, f.x, f.y - 12 - e * 3);
+      fg.fillStyle(col, 1).fillTriangle(f.x, f.y - 12 - e * 3, f.x + 9 + wave, f.y - 9 - e * 3, f.x, f.y - 6 - e * 3);
+    }
+
+    // camera flashes
+    const fl = this.flashGfx;
+    fl.clear();
+    if (this.excite.home + this.excite.away > 1.4 && Math.random() < 0.05) this.flashBurst(1);
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      const f = this.flashes[i];
+      f.life -= dt;
+      if (f.life <= 0) { this.flashes.splice(i, 1); continue; }
+      fl.fillStyle(0xffffff, Math.min(1, f.life * 6)).fillCircle(f.x, f.y, 2.2);
+    }
+
+    this.crowdAudioT -= dt;
+    if (this.crowdAudioT <= 0) {
+      this.crowdAudioT = 0.25;
+      this.audio.setExcitement((this.excite.home + this.excite.away) / 2);
+    }
+  }
+
+  // ═══════════════ REACTIONS (one place for sound + crowd + banner + referee) ═══════════════
+
+  private reactGoal(side: TeamSide): void {
+    const scorer = this.lastToucher;
+    const own = !!scorer && scorer.side !== side;
+    const num = scorer ? scorer.number : 0;
+    this.bumpCrowd(side, 1.2);
+    this.bumpCrowd(other(side), 0.25);
+    this.audio.sfx('horn');
+    this.audio.sfx('net');
+    this.audio.crowd('cheer', 1);
+    this.time.delayedCall(450, () => this.audio.crowd('groan', 0.3));
+    this.time.delayedCall(350, () => { this.audio.sfx('whistleLong'); this.playAction(this.referee, 'whistle'); });
+    this.time.delayedCall(900, () => this.playAction(this.referee, 'point', Math.atan2(CENTER_Y - this.referee.sprite.y, CENTER_X - this.referee.sprite.x)));
+    this.flashBurst(30);
+    const home = this.homeScore; const away = this.awayScore;
+    this.banner('GOAL!', own ? `OWN GOAL · ${teamName(side)} ${home}–${away}` : `${teamName(side)} · #${num} · ${home}–${away}`,
+      side === 'home' ? 0x4da3ff : 0xff6b6b, 2400, 5);
+    this.audio.speak(own ? `Own goal. ${teamName(side)} score.` : `Goal! ${teamName(side)}, number ${num}.`);
+    const t = side === 'home' ? this.sbHomeScore : this.sbAwayScore;
+    this.tweens.add({ targets: t, scale: { from: 1.7, to: 1 }, duration: 450, ease: 'Back.easeOut' });
+  }
+
+  private reactSave(gk: Footballer): void {
+    this.bumpCrowd(gk.side, 0.5);
+    this.bumpCrowd(other(gk.side), 0.3);
+    this.audio.sfx('glove');
+    this.audio.crowd('gasp', 0.6);
+    this.time.delayedCall(350, () => this.audio.crowd('applause', 0.7));
+    this.banner('SAVE!', `${teamName(gk.side)} keeper`, 0x06d6a0, 1000, 2);
+  }
+
+  private reactPost(ev: 'post' | 'bar'): void {
+    this.bumpCrowd('both', 0.5);
+    this.audio.crowd('ooh', 1);
+    this.banner(ev === 'post' ? 'OFF THE POST!' : 'OFF THE BAR!', 'So close!', 0xffd23f, 1100, 3);
+  }
+
+  private reactNearMiss(over: boolean): void {
+    this.bumpCrowd('both', 0.3);
+    this.audio.crowd('ooh', 0.6);
+    if (over) this.audio.crowd('groan', 0.25);
+  }
+
+  private reactFoul(fouler: TeamSide, spec: RestartSpec): void {
+    this.audio.sfx('whistleShort');
+    this.playAction(this.referee, 'whistle');
+    this.audio.crowd('boo', fouler === 'away' ? 0.6 : 0.3);
+    this.bumpCrowd('both', 0.2);
+    const n = this.foulCount[fouler];
+    if (spec.kind === 'penalty') {
+      this.bumpCrowd('both', 0.6);
+      this.audio.crowd('gasp', 1);
+      this.banner('PENALTY!', `${teamName(spec.team)} · foul by ${teamName(fouler)}`, 0xef476f, 2200, 4);
+      this.audio.speak(`Penalty to ${teamName(spec.team)}.`);
+    } else if (spec.kind === 'second-penalty') {
+      this.banner('10 m FREE KICK', `${teamName(fouler)} foul #${n} — accumulated fouls`, 0xef476f, 2000, 3);
+    } else {
+      this.banner('FOUL', `${teamName(fouler)} (#${n}) · free kick ${teamName(spec.team)}`, 0xffd23f, 1400, 1);
+    }
+  }
+
+  /** The referee points the way for a restart (the whistle is separate: only fouls, goals and kick-offs are whistled). */
+  private refSignalRestart(spec: RestartSpec): void {
+    if (spec.kind === 'kickoff') return;
+    const r = this.referee;
+    const dirA = spec.team === 'home' ? 1 : -1;
+    let aim = dirA === 1 ? 0 : Math.PI;
+    if (spec.kind === 'corner' || spec.kind === 'goal-clearance' || spec.kind === 'penalty' || spec.kind === 'second-penalty') {
+      aim = Math.atan2(spec.y - r.sprite.y, spec.x - r.sprite.x);
+    }
+    this.time.delayedCall(450, () => { if (this.state === 'restart') this.playAction(r, 'point', aim); });
+  }
+
+  private debugReact(kind: string): void {
+    this.audio.unlock();
+    switch (kind) {
+      case 'goal': this.reactGoal('home'); break;
+      case 'save': this.reactSave(this.keeperOf('away')); break;
+      case 'post': this.reactPost('post'); this.audio.sfx('post'); break;
+      case 'foul': this.reactFoul('away', { kind: 'free-kick', team: 'home', x: 400, y: 260 }); break;
+      case 'penalty': this.reactFoul('away', { kind: 'penalty', team: 'home', x: 788, y: 260 }); break;
+      case 'miss': this.reactNearMiss(true); break;
+      case 'applause': this.audio.crowd('applause', 1); break;
+      default: this.setMessage('react: goal | save | post | foul | penalty | miss | applause');
+    }
+  }
+
+  // ═══════════════ REFEREE ═══════════════
+
+  private createReferee(): void {
+    this.referee = this.makeFootballer('home', CENTER_X, FIELD_H - 70, 'MID', 0, REF_KIT);
+    this.referee.label.setVisible(false);
+  }
+
+  private updateReferee(dt: number): void {
+    const r = this.referee;
+    const st = this.state;
+    let tx = CENTER_X;
+    let ty = FIELD_H - 70;
+    if (st === 'restart' && this.restart) {
+      const rs = this.restart;
+      const dx = CENTER_X - rs.x; const dy = CENTER_Y - rs.y;
+      const l = Math.hypot(dx, dy) || 1;
+      tx = rs.x + (dx / l) * 80;
+      ty = rs.y + (dy / l) * 80;
+    } else if (st === 'playing') {
+      ty = this.ball.y < CENTER_Y ? this.ball.y + 105 : this.ball.y - 105;   // stays off the line of play
+      tx = this.ball.x - Math.sign(this.ballVx || 1) * 45;
+    } else if (st === 'goal') {
+      ty = CENTER_Y + 100;
+    }
+    tx = Phaser.Math.Clamp(tx, 45, FIELD_W - 45);
+    ty = Phaser.Math.Clamp(ty, 45, FIELD_H - 45);
+    const d = dist(r.sprite.x, r.sprite.y, tx, ty);
+    if (d > 6) {
+      const s = Math.min(150, d * 2.2);
+      const nx = r.sprite.x + ((tx - r.sprite.x) / d) * s * dt;
+      const ny = r.sprite.y + ((ty - r.sprite.y) / d) * s * dt;
+      r.sprite.setPosition(nx, ny);
+      r.shadow.setPosition(nx + 2, ny + SHADOW_DY);
+    }
+
+    // Arm raised while the 4-second count runs, and during play after an indirect free kick (until another player touches the ball)
+    const wantRaise =
+      (st === 'playing' && !!this.indirectPending && refKeepsArmUp(this.indirectPending.kind)) ||
+      (st === 'restart' && !!this.restart && this.restart.ready && RESTART_INFO[this.restart.kind].limit !== null);
+    const raising = r.act !== null && r.act.type === 'raise';
+    if (wantRaise && !r.act) this.playAction(r, 'raise');
+    else if (!wantRaise && raising) r.act = null;
+  }
+
+  // ═══════════════ PRESENTATION: scoreboard, banner, panels ═══════════════
+
+  private createScoreboard(): void {
+    const cx = CENTER_X;
+    const y0 = -52;
+    const g = this.add.graphics().setDepth(6);
+    g.fillStyle(0x05080c, 0.94).fillRoundedRect(cx - 215, y0, 430, 46, 8);
+    g.lineStyle(2, 0x3b4a5e, 1).strokeRoundedRect(cx - 215, y0, 430, 46, 8);
+    g.fillStyle(0x2d7fff, 1).fillRect(cx - 209, y0 + 6, 5, 22);
+    g.fillStyle(0xff3b47, 1).fillRect(cx + 204, y0 + 6, 5, 22);
+    const font = 'Barlow Condensed, Arial Black, sans-serif';
+    const mk = (x: number, y: number, size: string, color: string, ox: number): Phaser.GameObjects.Text =>
+      this.add.text(x, y, '', { fontFamily: font, fontSize: size, color, stroke: '#000000', strokeThickness: 2 }).setOrigin(ox, 0.5).setDepth(7);
+    this.sbHomeName = mk(cx - 198, y0 + 17, '17px', '#8ec5ff', 0);
+    this.sbAwayName = mk(cx + 198, y0 + 17, '17px', '#ff9aa2', 1);
+    this.sbHomeScore = mk(cx - 100, y0 + 17, '30px', '#ffffff', 0.5);
+    this.sbAwayScore = mk(cx + 100, y0 + 17, '30px', '#ffffff', 0.5);
+    this.sbClock = mk(cx, y0 + 17, '26px', '#ffd23f', 0.5);
+    this.sbPeriod = mk(cx, y0 + 38, '11px', '#cfd8e3', 0.5);
+    this.sbLive = mk(cx + 74, y0 + 38, '10px', '#06d6a0', 0.5);
+    this.sbHomeName.setText('ROCKETS');
+    this.sbAwayName.setText('COMETS');
+    this.sbPips = this.add.graphics().setDepth(7);
+  }
+
+  private updateScoreboard(): void {
+    if (!this.sbClock) return;
+    const set = (tx: Phaser.GameObjects.Text, s: string): void => { if (tx.text !== s) tx.setText(s); };
+    set(this.sbHomeScore, String(this.homeScore));
+    set(this.sbAwayScore, String(this.awayScore));
+    set(this.sbClock, formatClock(this.remaining));
+    const per = this.state === 'halftime' ? 'HALF-TIME'
+      : this.state === 'fulltime' ? 'FULL-TIME'
+        : this.half === 1 ? '1ST HALF' : this.half === 2 ? '2ND HALF' : 'EXTRA TIME';
+    set(this.sbPeriod, per);
+    const live = this.state === 'playing';
+    set(this.sbLive, live ? '● LIVE' : '❚❚ STOPPED');
+    this.sbLive.setColor(live ? '#06d6a0' : '#ef476f');
+
+    const key = `${this.foulCount.home}-${this.foulCount.away}`;
+    if (key !== this.sbPipsKey) {
+      this.sbPipsKey = key;
+      const g = this.sbPips;
+      g.clear();
+      const draw = (fouls: number, x0: number, dir: number): void => {
+        const p = pips(fouls);
+        for (let i = 0; i < 5; i++) {
+          const on = i < p.filled;
+          g.fillStyle(on ? (p.red ? 0xef476f : 0xffd23f) : 0x2a3340, 1).fillCircle(x0 + dir * i * 11, -52 + 38, 3.6);
+        }
+      };
+      draw(this.foulCount.home, CENTER_X - 190, 1);
+      draw(this.foulCount.away, CENTER_X + 190, -1);
+    }
+  }
+
+  private createBanner(): void {
+    const font = 'Barlow Condensed, Arial Black, sans-serif';
+    this.bannerBg = this.add.rectangle(CENTER_X, 80, 400, 56, 0x0b1b2b, 0.9).setStrokeStyle(2, 0xffd23f).setDepth(60).setVisible(false);
+    this.bannerTitle = this.add.text(CENTER_X, 68, '', { fontFamily: font, fontSize: '26px', color: '#ffd23f', stroke: '#000000', strokeThickness: 4 })
+      .setOrigin(0.5).setDepth(61).setVisible(false);
+    this.bannerSub = this.add.text(CENTER_X, 92, '', { fontFamily: font, fontSize: '15px', color: '#ffffff', stroke: '#000000', strokeThickness: 3 })
+      .setOrigin(0.5).setDepth(61).setVisible(false);
+  }
+
+  /** Match announcement strip. Higher-priority banners are never covered by lower ones. */
+  private banner(title: string, sub: string, color: number, ms: number, prio: number): void {
+    const now = this.time.now;
+    if (!bannerAllowed(now, this.bannerUntil, this.bannerPrio, prio)) return;
+    this.bannerPrio = prio;
+    this.bannerUntil = now + ms;
+    const token = ++this.bannerToken;
+    this.bannerBg.setStrokeStyle(2, color).setVisible(true);
+    this.bannerTitle.setText(title).setColor(hex(color)).setVisible(true);
+    this.bannerSub.setText(sub).setVisible(true);
+    const items = [this.bannerBg, this.bannerTitle, this.bannerSub];
+    this.tweens.killTweensOf(items);
+    items.forEach((o) => o.setAlpha(0));
+    this.tweens.add({ targets: items, alpha: 1, duration: 150 });
+    this.time.delayedCall(ms, () => {
+      if (token !== this.bannerToken) return;
+      this.tweens.add({ targets: items, alpha: 0, duration: 250, onComplete: () => items.forEach((o) => o.setVisible(false)) });
+    });
+  }
+
+  private createPanel(): void {
+    const font = 'Barlow Condensed, Arial Black, sans-serif';
+    const cx = CENTER_X;
+    const top = 70;
+    const bg = this.add.rectangle(cx, CENTER_Y, 520, 390, 0x0b1b2b, 0.92).setStrokeStyle(3, 0xffd23f).setDepth(70);
+    this.panelTitle = this.add.text(cx, top + 8, '', { fontFamily: font, fontSize: '30px', color: '#ffd23f', stroke: '#000000', strokeThickness: 4 }).setOrigin(0.5, 0).setDepth(71);
+    this.panelScore = this.add.text(cx, top + 48, '', { fontFamily: font, fontSize: '48px', color: '#ffffff', stroke: '#000000', strokeThickness: 5 }).setOrigin(0.5, 0).setDepth(71);
+    this.panelSub = this.add.text(cx, top + 108, '', { fontFamily: font, fontSize: '18px', color: '#cfd8e3', stroke: '#000000', strokeThickness: 3 }).setOrigin(0.5, 0).setDepth(71);
+    const hn = this.add.text(cx - 150, top + 136, 'ROCKETS', { fontFamily: font, fontSize: '16px', color: '#8ec5ff' }).setOrigin(0.5, 0).setDepth(71);
+    const an = this.add.text(cx + 150, top + 136, 'COMETS', { fontFamily: font, fontSize: '16px', color: '#ff9aa2' }).setOrigin(0.5, 0).setDepth(71);
+    this.panelItems = [bg, this.panelTitle, this.panelScore, this.panelSub, hn, an];
+    for (let i = 0; i < 9; i++) {
+      const y = top + 160 + i * 22;
+      const label = this.add.text(cx, y, '', { fontFamily: font, fontSize: '15px', color: '#ffd23f' }).setOrigin(0.5, 0).setDepth(71);
+      const h = this.add.text(cx - 150, y, '', { fontFamily: font, fontSize: '17px', color: '#ffffff' }).setOrigin(0.5, 0).setDepth(71);
+      const a = this.add.text(cx + 150, y, '', { fontFamily: font, fontSize: '17px', color: '#ffffff' }).setOrigin(0.5, 0).setDepth(71);
+      this.panelRows.push({ label, h, a });
+      this.panelItems.push(label, h, a);
+    }
+    this.panelHint = this.add.text(cx, top + 365, '', { fontFamily: font, fontSize: '15px', color: '#06d6a0', stroke: '#000000', strokeThickness: 3 }).setOrigin(0.5, 0).setDepth(71);
+    this.panelItems.push(this.panelHint);
+    this.panelItems.forEach((o) => (o as Phaser.GameObjects.Components.Visible & Phaser.GameObjects.GameObject).setVisible(false));
+    this.panelRowsVisible(false);
+  }
+
+  private panelRowsVisible(v: boolean): void {
+    this.panelRows.forEach((r) => { r.label.setVisible(v); r.h.setVisible(v); r.a.setVisible(v); });
+  }
+
+  private statRows(): [string, string, string][] {
+    const h = this.stats.home; const a = this.stats.away;
+    const [ph, pa] = possessionPct(h.poss, a.poss);
+    return [
+      ['POSSESSION', `${ph}%`, `${pa}%`],
+      ['SHOTS', String(h.shots), String(a.shots)],
+      ['ON TARGET', String(h.onTarget), String(a.onTarget)],
+      ['PASSES', String(h.passes), String(a.passes)],
+      ['PASS ACCURACY', `${passAccuracy(h.passOk, h.passes)}%`, `${passAccuracy(a.passOk, a.passes)}%`],
+      ['TACKLES WON', String(h.tackles), String(a.tackles)],
+      ['SAVES', String(h.saves), String(a.saves)],
+      ['FOULS', String(h.fouls), String(a.fouls)],
+      ['CORNERS', String(h.corners), String(a.corners)],
+    ];
+  }
+
+  private showPanel(title: string, sub: string, hint: string, withStats: boolean): void {
+    this.panelItems.forEach((o) => (o as Phaser.GameObjects.Components.Visible & Phaser.GameObjects.GameObject).setVisible(true));
+    this.panelTitle.setText(title);
+    this.panelScore.setText(withStats ? `${this.homeScore} – ${this.awayScore}` : '');
+    this.panelSub.setText(sub);
+    this.panelHint.setText(hint);
+    this.panelRowsVisible(withStats);
+    if (withStats) {
+      const rows = this.statRows();
+      this.panelRows.forEach((r, i) => { r.label.setText(rows[i][0]); r.h.setText(rows[i][1]); r.a.setText(rows[i][2]); });
+    }
+  }
+
+  private hidePanel(): void {
+    this.panelItems.forEach((o) => (o as Phaser.GameObjects.Components.Visible & Phaser.GameObjects.GameObject).setVisible(false));
+    this.panelRowsVisible(false);
+  }
+
+  // ═══════════════ ENTRANCES, HALF-TIME ═══════════════
+
+  /** Players walk out of the tunnel, line up, and the match starts. Short = the second-half re-entry. */
+  private startEntrance(short: boolean, done: () => void): void {
+    this.state = 'intro';
+    this.restart = null; this.gkHolder = null; this.carrier = null; this.passTarget = null; this.oneTwo = null;
+    this.possession = null;
+    this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0; this.ballCurl = 0; this.ballVSpin = 0;
+    this.ball.setPosition(CENTER_X, CENTER_Y);
+    const targets = new Map<Footballer, { tx: number; ty: number; delay: number }>();
+    for (const side of ['home', 'away'] as TeamSide[]) {
+      this.players.filter((p) => p.side === side).forEach((p, i) => {
+        const spot = lineupSpot(side, i);
+        targets.set(p, { tx: spot.x, ty: spot.y, delay: i * (short ? 0.12 : 0.45) });
+        p.vx = 0; p.vy = 0; p.act = null; p.celebrating = false; p.cooldown = 0;
+        const sx = CENTER_X + (side === 'home' ? -40 : 40);
+        p.sprite.setPosition(sx, TUNNEL_Y);
+        p.shadow.setPosition(sx + 2, TUNNEL_Y + SHADOW_DY);
+        p.lastX = sx; p.lastY = TUNNEL_Y;
+        if (p.gk) this.resetKeeper(p.gk);
+      });
+    }
+    this.entrance = { t: 0, short, lineT: 0, announced: false, done, targets };
+  }
+
+  /** Straight walk without the pitch clamp (players come from outside the field). Returns true on arrival. */
+  private walkPlayer(p: Footballer, tx: number, ty: number, speed: number, dt: number): boolean {
+    const dx = tx - p.sprite.x;
+    const dy = ty - p.sprite.y;
+    const d = Math.hypot(dx, dy);
+    if (d <= 3) return true;
+    const s = Math.min(speed, d * 4);
+    const nx = p.sprite.x + (dx / d) * s * dt;
+    const ny = p.sprite.y + (dy / d) * s * dt;
+    p.sprite.setPosition(nx, ny);
+    p.shadow.setPosition(nx + 2, ny + SHADOW_DY);
+    p.facing = Math.atan2(dy, dx);
+    return d - s * dt <= 3;
+  }
+
+  private updateEntrance(dt: number): void {
+    const e = this.entrance;
+    if (!e) { this.startKickoff(this.openingKickoff); return; }
+    e.t += dt;
+    let allIn = true;
+    for (const p of this.players) {
+      const info = e.targets.get(p)!;
+      if (e.t < info.delay) { allIn = false; continue; }
+      if (!this.walkPlayer(p, info.tx, info.ty, 125, dt)) allIn = false;
+    }
+    if (!allIn) return;
+    e.lineT += dt;
+    if (!e.announced) {
+      e.announced = true;
+      if (!e.short) {
+        this.banner('TONIGHT', 'Rockets vs Comets', 0xffd23f, 2400, 2);
+        this.audio.crowd('cheer', 0.6);
+        this.bumpCrowd('both', 0.5);
+        this.audio.speak('Ladies and gentlemen, welcome to Retro Kick Futsal. Rockets versus Comets.');
+      }
+    }
+    if (e.lineT > (e.short ? 0.4 : 2.2)) this.finishEntrance();
+  }
+
+  private finishEntrance(): void {
+    const e = this.entrance;
+    if (!e) return;
+    this.entrance = null;
+    this.hidePanel();
+    e.done();
+  }
+
+  private beginHalftime(): void {
+    this.state = 'halftime';
+    this.halftimeT = 0;
+    this.restart = null; this.gkHolder = null; this.carrier = null; this.possession = null;
+    this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0; this.ballCurl = 0; this.ballVSpin = 0;
+    this.ball.setPosition(CENTER_X, CENTER_Y);
+    this.players.forEach((p) => { p.vx = 0; p.vy = 0; p.act = null; p.celebrating = false; });
+    this.audio.sfx('whistleLong');
+    this.playAction(this.referee, 'whistle');
+    this.audio.crowd('applause', 1);
+    this.bumpCrowd('both', 0.5);
+    this.banner('HALF-TIME', `${teamName('home')} ${this.homeScore}–${this.awayScore} ${teamName('away')}`, 0xffd23f, 3000, 6);
+    this.showPanel('HALF-TIME', 'The second half starts shortly', 'ENTER or click to continue', true);
+    this.audio.speak(`Half-time. Rockets ${this.homeScore}, Comets ${this.awayScore}.`);
+  }
+
+  private updateHalftime(dt: number): void {
+    this.halftimeT += dt;
+    // both teams walk off down the tunnel
+    this.players.forEach((p, i) => {
+      const idx = i % 7;
+      if (this.halftimeT < idx * 0.2) return;
+      this.walkPlayer(p, CENTER_X + (p.side === 'home' ? -40 : 40), TUNNEL_Y, 130, dt);
+    });
+    if (this.halftimeT > 7.5) this.endHalftime();
+  }
+
+  private endHalftime(): void {
+    this.hidePanel();
+    this.startEntrance(true, () => this.startKickoff(other(this.openingKickoff)));
+  }
+
+  private skipPresentation(): void {
+    if (this.state === 'intro' && this.entrance && this.entrance.t > 0.6) this.finishEntrance();
+    else if (this.state === 'halftime' && this.halftimeT > 1.0) this.endHalftime();
+  }
+
+  // ═══════════════ OVERLAYS ═══════════════
+
   private createOverlays(): void {
     this.goalFlash = this.add
-      .rectangle(FIELD_W / 2, FIELD_H / 2, FIELD_W, FIELD_H, 0xffffff, 0)
+      .rectangle(FIELD_W / 2, CENTER_Y, FIELD_W, GAME_H, 0xffffff, 0)
       .setDepth(50).setAlpha(0);
 
     this.goalText = this.add
@@ -1117,13 +1762,21 @@ class RetroKickScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 1).setDepth(46);
     this.aimGfx = this.add.graphics().setDepth(45);
+    this.markerGfx = this.add.graphics().setDepth(13);
 
+    // tactics + audio status live in the bottom stand
     this.tacticText = this.add
-      .text(FIELD_W / 2, FIELD_H - 2, '', {
+      .text(CENTER_X - 200, FIELD_H + STAND - 6, '', {
         fontFamily: 'Barlow Condensed, Arial Black, sans-serif', fontSize: '12px', color: '#ffffff',
         stroke: '#000000', strokeThickness: 3, align: 'center',
       })
       .setOrigin(0.5, 1).setDepth(47);
+    this.audioText = this.add
+      .text(FIELD_W - 8, FIELD_H + STAND - 6, '', {
+        fontFamily: 'Barlow Condensed, Arial Black, sans-serif', fontSize: '12px', color: '#9fd0ff',
+        stroke: '#000000', strokeThickness: 3, align: 'right',
+      })
+      .setOrigin(1, 1).setDepth(47);
   }
 
   // ═══════════════ TEAMS ═══════════════
@@ -1152,8 +1805,8 @@ class RetroKickScene extends Phaser.Scene {
     };
   }
 
-  private addPlayer(side: TeamSide, x: number, y: number, role: Footballer['role'], number: number): void {
-    const kit = makeKit(side, role, number);
+  private makeFootballer(side: TeamSide, x: number, y: number, role: Footballer['role'], number: number, kit?: Kit): Footballer {
+    const k = kit ?? makeKit(side, role, number);
     const container = this.add.container(x, y).setDepth(20);
     const shadow = this.add
       .ellipse(x + 2, y + SHADOW_DY, role === 'GK' ? 24 : 22, 13, 0x000000, 0.3)
@@ -1167,16 +1820,19 @@ class RetroKickScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
     container.add([ring, rig, label]);
-
-    this.players.push({
+    return {
       sprite: container, ring, rig, shadow, label, side, role,
       homeX: x, homeY: y, vx: 0, vy: 0, number, cooldown: 0,
       celebrating: false, celebrateUntil: 0,
       facing: side === 'home' ? 0 : Math.PI,
-      kit, vis: side === 'home' ? 0 : Math.PI, stride: Math.random() * Math.PI * 2,
+      kit: k, vis: side === 'home' ? 0 : Math.PI, stride: Math.random() * Math.PI * 2,
       speed: 0, lastX: x, lastY: y, anim: 'idle', act: null,
       gk: role === 'GK' ? this.makeBrain() : null,
-    });
+    };
+  }
+
+  private addPlayer(side: TeamSide, x: number, y: number, role: Footballer['role'], number: number): void {
+    this.players.push(this.makeFootballer(side, x, y, role, number));
   }
 
   private createBall(): void {
@@ -1198,6 +1854,7 @@ class RetroKickScene extends Phaser.Scene {
   private animateAll(dt: number): void {
     if (dt <= 0) return;
     for (const p of this.players) this.animatePlayer(p, dt);
+    this.animatePlayer(this.referee, dt);
   }
 
   private gkAnimName(b: GkBrain, moving: boolean): AnimName {
@@ -1238,7 +1895,7 @@ class RetroKickScene extends Phaser.Scene {
     let target: number;
     if (p.act && p.act.aim !== undefined) target = p.act.aim;
     else if (p.celebrating) target = Math.PI / 2;
-    else if (p.gk) target = Math.atan2(this.ball.y - y, this.ball.x - x);
+    else if (p.gk && this.state !== 'intro' && this.state !== 'halftime') target = Math.atan2(this.ball.y - y, this.ball.x - x);
     else if (moving) target = Math.atan2(dy, dx);
     else target = Math.atan2(this.ball.y - y, this.ball.x - x);
 
@@ -1389,7 +2046,7 @@ class RetroKickScene extends Phaser.Scene {
       hLy -= out; hRy -= out;
     }
 
-    if (p.gk && !a && !p.celebrating) {
+    if (p.gk && !a && !p.celebrating && this.state !== 'intro' && this.state !== 'halftime') {
       const q = this.gkPose(p, p.gk, ph);
       fLx = q.fLx; fLy = q.fLy; fRx = q.fRx; fRy = q.fRy;
       hLx = q.hLx; hLy = q.hLy; hRx = q.hRx; hRy = q.hRy;
@@ -1438,6 +2095,15 @@ class RetroKickScene extends Phaser.Scene {
         case 'miss':
           hLx = 1.5; hLy = -4.5; hRx = 1.5; hRy = 4.5; elbowOut = 3.5;
           lean = -1.2; headYaw = 0; stance = 4; fLy = -stance; fRy = stance;
+          break;
+        case 'point':            // referee: arm straight out toward the restart
+          hRx = 18; hRy = 2; hLx = -1; hLy = -9; lean = 0.5; free = true;
+          break;
+        case 'whistle':          // referee: hand to the mouth
+          hRx = 5; hRy = 3; hLx = -1; hLy = -9.5; lean = 0.5;
+          break;
+        case 'raise':            // referee: arm raised (4-second count, indirect free kick)
+          hRx = 3; hRy = 5.5; handR = 3.3; hLx = -1; hLy = -9.5; lean = 0; sx = sy = 1.04;
           break;
       }
     } else if (p.celebrating) {
@@ -1518,9 +2184,20 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ UPDATE LOOP ═══════════════
 
+  private handleAudioKeys(): void {
+    const k = this.keys;
+    let changed = false;
+    if (Phaser.Input.Keyboard.JustDown(k.M)) { this.audio.unlock(); this.audio.toggleMute(); changed = true; }
+    if (Phaser.Input.Keyboard.JustDown(k.N)) { this.audio.toggleVoice(); changed = true; }
+    if (Phaser.Input.Keyboard.JustDown(k.OPEN_BRACKET)) { this.audio.changeVolume(-0.1); changed = true; }
+    if (Phaser.Input.Keyboard.JustDown(k.CLOSED_BRACKET)) { this.audio.changeVolume(0.1); changed = true; }
+    if (changed) this.audioText.setText(this.audio.status());
+  }
+
   update(time: number, delta: number): void {
     if (Phaser.Input.Keyboard.JustDown(this.keys.T)) this.cycleTactic('away');
     if (Phaser.Input.Keyboard.JustDown(this.keys.G)) this.cycleTactic('home');
+    this.handleAudioKeys();
 
     if (this.keys.P.isDown && !this.pauseKeyHeld) {
       this.paused = !this.paused;
@@ -1528,10 +2205,26 @@ class RetroKickScene extends Phaser.Scene {
       this.setMessage(this.paused ? 'Paused — press P to resume' : this.restart ? this.restart.baseMsg : 'Play on!');
     }
     if (this.keys.P.isUp) this.pauseKeyHeld = false;
-    if (this.keys.ENTER.isDown && this.ended) this.resetMatch();
-    if (this.paused || this.ended) return;
+    if (this.paused) return;
 
     const dt = Math.min(delta / 1000, 0.035);
+
+    if (Phaser.Input.Keyboard.JustDown(this.keys.ENTER)) {
+      if (this.ended) { this.resetMatch(); return; }
+      this.skipPresentation();
+    }
+
+    if (this.ended) {
+      // full-time: the match is over but the arena keeps living (crowd, winners celebrating, referee)
+      this.updateCrowd(dt);
+      this.updateReferee(dt);
+      this.updateParticles(dt);
+      this.updateCamera(dt);
+      this.syncBallVisuals();
+      this.updateScoreboard();
+      this.animateAll(dt);
+      return;
+    }
 
     if (this.state === 'playing') {
       this.clockAcc += dt;
@@ -1549,7 +2242,11 @@ class RetroKickScene extends Phaser.Scene {
       if (p.cooldown > 0) p.cooldown -= dt;
     });
 
-    if (this.state === 'restart') {
+    if (this.state === 'intro') {
+      this.updateEntrance(dt);
+    } else if (this.state === 'halftime') {
+      this.updateHalftime(dt);
+    } else if (this.state === 'restart') {
       this.updateRestart(dt);
     } else if (this.state === 'playing') {
       if (this.possession) this.stats[this.possession].poss += dt;
@@ -1565,9 +2262,13 @@ class RetroKickScene extends Phaser.Scene {
     } else if (this.state === 'goal') {
       this.tickConcede(dt);
     }
+    if (this.state !== 'restart') this.markerGfx.clear();
+    this.updateCrowd(dt);
+    this.updateReferee(dt);
     this.updateParticles(dt);
     this.updateCamera(dt);
     this.syncBallVisuals();
+    this.updateScoreboard();
     this.animateAll(dt);
   }
 
@@ -1581,12 +2282,10 @@ class RetroKickScene extends Phaser.Scene {
     const a = this.ballSpin;
     this.ballInner.setPosition(vx + Math.cos(a) * 2.4, vy + Math.sin(a) * 2.4);
     this.ballInner2.setPosition(vx - Math.cos(a) * 2.4, vy - Math.sin(a) * 2.4);
-    // the shadow stays on the ground: it shrinks, fades and drifts as the ball rises
     this.ballShadow.setPosition(this.ball.x + 2 + h * 0.15, this.ball.y + 6 + h * 0.1);
     this.ballShadow.setScale(1 - Math.min(0.5, h * 0.015));
     this.ballShadow.setAlpha(0.4 - Math.min(0.22, h * 0.007));
 
-    // motion trail on fast balls
     this.trail.push({ x: vx, y: vy });
     if (this.trail.length > 5) this.trail.shift();
     this.trailGfx.clear();
@@ -1603,14 +2302,15 @@ class RetroKickScene extends Phaser.Scene {
     if (this.half === 1) {
       this.half = 2;
       this.remaining = HALF_SECONDS;
-      this.startKickoff(other(this.openingKickoff));
-      this.setMessage('⚽ HALF-TIME! ' + this.restart!.baseMsg);
+      this.beginHalftime();
     } else if (this.half === 2 && this.homeScore === this.awayScore) {
       this.half = 3;
       this.remaining = EXTRA_TIME_SECONDS;
       this.startKickoff(this.openingKickoff);
       this.flashScreen(0xffd23f, 0.3);
-      this.setMessage('⏱ EXTRA TIME! Golden goal — ' + this.restart!.baseMsg);
+      this.audio.sfx('whistleLong');
+      this.banner('EXTRA TIME', 'Golden goal wins it', 0xffd23f, 2400, 6);
+      this.audio.speak('Extra time. The next goal wins.');
     } else {
       this.endMatch();
     }
@@ -1622,13 +2322,29 @@ class RetroKickScene extends Phaser.Scene {
     this.restart = null;
     this.restartLabel.setText('');
     this.aimGfx.clear();
-    const msg =
-      this.homeScore === this.awayScore
-        ? '🤝 Full-time — it ends level!'
-        : this.homeScore > this.awayScore
-          ? '🏆 FULL-TIME — Rockets win!'
-          : '🏆 FULL-TIME — Comets win!';
-    this.setMessage(msg);
+    this.markerGfx.clear();
+    const hs = this.homeScore; const as = this.awayScore;
+    const result = hs === as ? 'IT ENDS LEVEL' : hs > as ? 'ROCKETS WIN!' : 'COMETS WIN!';
+    this.setMessage(hs === as ? '🤝 Full-time — it ends level!' : `🏆 FULL-TIME — ${hs > as ? 'Rockets' : 'Comets'} win!`);
+
+    // winners celebrate until the next match; the arena erupts
+    const now = this.time.now;
+    this.players.forEach((p) => {
+      p.vx = 0; p.vy = 0; p.act = null;
+      p.celebrating = hs !== as && p.side === (hs > as ? 'home' : 'away');
+      p.celebrateUntil = now + 1e9;
+    });
+    this.audio.sfx('whistleTriple');
+    this.playAction(this.referee, 'whistle');
+    this.time.delayedCall(700, () => this.audio.crowd('applause', 1));
+    this.bumpCrowd(hs >= as ? 'home' : 'away', 1);
+    this.bumpCrowd(hs > as ? 'away' : 'home', 0.4);
+    this.flashBurst(24);
+    this.banner('FULL-TIME', `${teamName('home')} ${hs}–${as} ${teamName('away')}`, 0xffd23f, 3500, 6);
+    this.showPanel('FULL-TIME', result, 'CLICK or press ENTER to play again', true);
+    this.audio.speak(hs === as
+      ? `Full-time. It finishes ${hs}, ${as}.`
+      : `Full-time. ${hs > as ? 'Rockets' : 'Comets'} win, ${Math.max(hs, as)} ${Math.min(hs, as)}.`);
     if (this.hint) {
       this.hint.textContent = 'FULL-TIME · CLICK TO PLAY AGAIN';
       this.hint.style.display = 'block';
@@ -1651,17 +2367,19 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private statsSummary(): Record<TeamSide, Record<string, number | string>> {
-    const tot = this.stats.home.poss + this.stats.away.poss || 1;
-    const f = (s: TeamSide): Record<string, number | string> => {
+    const [ph, pa] = possessionPct(this.stats.home.poss, this.stats.away.poss);
+    const f = (s: TeamSide, pc: number): Record<string, number | string> => {
       const st = this.stats[s];
       return {
         tactic: TACTICS[this.tactics[s]].label,
-        possession: Math.round((100 * st.poss) / tot) + '%',
+        possession: pc + '%',
         avgDefLine: st.lineN ? Math.round(st.lineSum / st.lineN) : 0,
-        passes: st.passes, shots: st.shots, intercepts: st.intercepts, tackles: st.tackles,
+        passes: st.passes, passAccuracy: passAccuracy(st.passOk, st.passes) + '%',
+        shots: st.shots, onTarget: st.onTarget, saves: st.saves,
+        intercepts: st.intercepts, tackles: st.tackles, fouls: st.fouls, corners: st.corners,
       };
     };
-    return { home: f('home'), away: f('away') };
+    return { home: f('home', ph), away: f('away', pa) };
   }
 
   // ═══════════════ USER INPUT (open play) ═══════════════
@@ -1693,7 +2411,6 @@ class RetroKickScene extends Phaser.Scene {
       else this.selectControlled();
     }
 
-    // Shooting: hold Z to charge power, release to shoot (a tap is a normal shot)
     const kz = this.keys.Z;
     if (Phaser.Input.Keyboard.JustDown(kz)) {
       const d = dist(this.controlled.sprite.x, this.controlled.sprite.y, this.ball.x, this.ball.y);
@@ -1761,7 +2478,7 @@ class RetroKickScene extends Phaser.Scene {
     let best: { p: Footballer; x: number; y: number; t: number } | null = null;
     for (let i = 3; i < samples.length; i += 3) {
       const s = samples[i];
-      if (s.z > 10) continue;                                   // a ball in the air above head height cannot be intercepted
+      if (s.z > 10) continue;
       for (const p of mates) {
         const reach = dist(p.sprite.x, p.sprite.y, s.x, s.y) / 175;
         if (reach <= s.t - 0.05 && (!best || s.t < best.t)) best = { p, x: s.x, y: s.y, t: s.t };
@@ -1864,7 +2581,6 @@ class RetroKickScene extends Phaser.Scene {
           continue;
         }
         if (this.passTarget === p) {
-          // the receiver moves to where the pass will arrive (for a lob: where it lands)
           const pred = this.getBallPrediction();
           const landing = pred.find((s) => s.t > 0.2 && s.z < 1.5);
           const e = landing ?? (pred.length ? pred[Math.min(pred.length - 1, 36)] : ball);
@@ -2009,7 +2725,6 @@ class RetroKickScene extends Phaser.Scene {
       this.thinkTimer = 0.28;
       const held = (now - this.carrierSince) / 1000;
 
-      // 1) shoot when the chance is good enough and the range is sensible
       const gk = this.keeperOf(other(side)).sprite;
       const q = shotQuality(pos, att, foePts, { x: gk.x, y: gk.y });
       const dGoal = Math.hypot(goalX - pos.x, CENTER_Y - pos.y);
@@ -2018,7 +2733,6 @@ class RetroKickScene extends Phaser.Scene {
         return hold;
       }
 
-      // 2) best pass option: driven or lofted (a lob avoids a blocked lane), through balls for runners
       let best: { m: Footballer; lead: Pt; score: number; through: boolean; lob: boolean } | null = null;
       for (const m of this.players) {
         if (m.side !== side || m === c || m.role === 'GK') continue;
@@ -2043,7 +2757,6 @@ class RetroKickScene extends Phaser.Scene {
       }
     }
 
-    // 3) dribble toward goal, bending away from nearby defenders
     let dx = goalX - att * 70 - pos.x;
     let dy = CENTER_Y - pos.y;
     const dl = Math.hypot(dx, dy) || 1;
@@ -2072,7 +2785,6 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  /** CPU shot: power, curl and height chosen from the situation. */
   private cpuShoot(c: Footballer, q: number, dGoal: number): void {
     const side = c.side;
     const gk = this.keeperOf(other(side)).sprite;
@@ -2081,7 +2793,7 @@ class RetroKickScene extends Phaser.Scene {
     const power = dGoal > 200 ? Phaser.Math.FloatBetween(0.85, 1) : Phaser.Math.Clamp(0.45 + q * 0.3 + Phaser.Math.FloatBetween(0, 0.15), 0.45, 0.9);
     const curlOn = wide && dGoal < 280 && Math.random() < 0.4;
     this.takeShot(c, ty, power, Math.random() < 0.3, curlOn);
-    this.playSound('shoot');
+    this.playSound('shoot', 0.5 + power * 0.6);
     this.setMessage(`${power > 0.85 ? 'Power shot' : curlOn ? 'Curled shot' : 'Shot'} from ${teamName(side)}!`);
   }
 
@@ -2114,14 +2826,13 @@ class RetroKickScene extends Phaser.Scene {
       this.stats[p.side].tackles++;
       const loser = p.side === 'home' ? this.carrier : this.controlled;
       this.playSound('tackle');
-      this.knockLoose(p, loser);                           // the ball is knocked free and contested
+      this.knockLoose(p, loser);
       this.spawnDustParticles(this.ball.x, this.ball.y);
       this.setMessage(`${teamName(p.side)} win the tackle — loose ball!`);
     }
     return false;
   }
 
-  /** After a won tackle the ball squirts away from the tackle and both players must fight for it. */
   private knockLoose(tackler: Footballer, loser: Footballer | null): void {
     const ang = tackler.facing + Phaser.Math.FloatBetween(-0.5, 0.5);
     this.ballVx = Math.cos(ang) * 140 + (loser ? loser.vx * 0.3 : 0);
@@ -2186,7 +2897,6 @@ class RetroKickScene extends Phaser.Scene {
     b.contactCool = 0; b.flickT = 0; b.planTouchId = this.touchId;
   }
 
-  /** Forward simulation with the SAME stepBall the game uses (curl, spin, bounces and the goal frame included). */
   private predictBall(maxT = 1.6): Sample[] {
     const s: BallState = {
       x: this.ball.x, y: this.ball.y, z: this.ballHeight,
@@ -2393,6 +3103,8 @@ class RetroKickScene extends Phaser.Scene {
     const dirIn = gk.side === 'home' ? 1 : -1;
     b.contactCool = 0.4;
     b.flickT = 0.5;
+    // a recorded shot that reaches the keeper was on target
+    if (this.shooter && this.shooter.side !== gk.side) this.stats[this.shooter.side].onTarget++;
 
     if (hit.kind === 'body') {
       b.result = 'block';
@@ -2401,7 +3113,9 @@ class RetroKickScene extends Phaser.Scene {
     }
 
     this.shotMissed();
+    this.stats[gk.side].saves++;
     const res = resolveSaveContact(speed, hit.quality, this.ballHeight);
+    this.reactSave(gk);
     if (res === 'catch') {
       b.result = 'catch';
       this.registerTouch(gk);
@@ -2427,7 +3141,7 @@ class RetroKickScene extends Phaser.Scene {
     this.ballVx = (px / nl) * sp;
     this.ballVy = (py / nl) * sp;
     this.ballVz = vz;
-    this.ballCurl = Phaser.Math.FloatBetween(-0.4, 0.4);    // a parried ball leaves with a little spin
+    this.ballCurl = Phaser.Math.FloatBetween(-0.4, 0.4);
     this.ballVSpin = 0;
     this.registerTouch(gk);
     this.possession = null;
@@ -2473,12 +3187,14 @@ class RetroKickScene extends Phaser.Scene {
   private handleBallEvent(ev: BallEvent): void {
     if (ev === 'bounce') {
       this.ballSquash = 1;
-      if (LAST_IMPACT > 90) this.playSound('bounce');
+      if (LAST_IMPACT > 90) this.playSound('bounce', Math.min(1, LAST_IMPACT / 250));
     } else if (ev === 'post' || ev === 'bar') {
       this.playSound('post');
       this.cameraShake = Math.max(this.cameraShake, 0.12);
-      this.touchId++;                                       // the keeper must re-read the ball
-      this.shotMissed();                                    // the shooter reacts: so close
+      this.touchId++;
+      if (this.shooter && this.shooter.side !== this.lastTouch) { /* not a shot at his goal */ } else if (this.shooter) this.stats[this.shooter.side].onTarget++;
+      this.shotMissed();
+      this.reactPost(ev);
       this.setMessage(ev === 'post' ? '🥅 OFF THE POST!' : '🥅 OFF THE BAR!');
     }
   }
@@ -2488,6 +3204,10 @@ class RetroKickScene extends Phaser.Scene {
     const decision = decideOutOfPlay(this.ball.x, this.ball.y, this.lastTouch, this.ballHeight);
     if (!decision) return false;
     const z = this.ballHeight;
+    // a shot that just misses the goal is a near miss: the crowd reacts
+    if (decision.kind === 'goal-clearance' && this.shooter && this.time.now <= this.shooterUntil && decision.team !== this.shooter.side) {
+      if (Math.abs(this.ball.y - CENTER_Y) < GOAL_HALF + 40 || z > GOAL_HEIGHT) this.reactNearMiss(z > GOAL_HEIGHT);
+    }
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
     this.ballCurl = 0; this.ballVSpin = 0;
     if (decision.kind === 'goal') {
@@ -2504,8 +3224,14 @@ class RetroKickScene extends Phaser.Scene {
 
   private registerTouch(p: Footballer): void {
     this.lastTouch = p.side;
+    this.lastToucher = p;
     this.touchId++;
     this.passTarget = null;
+    // pass accuracy: a pass counts as completed when a team-mate touches the ball next
+    if (this.pendingPass) {
+      if (p.side === this.pendingPass.side && p !== this.pendingPass.kicker) this.stats[p.side].passOk++;
+      this.pendingPass = null;
+    }
     if (this.indirectPending && p !== this.indirectPending.taker) this.indirectPending = null;
     if (this.shooter && p.side === this.shooter.side && p !== this.shooter) this.shooter = null;
   }
@@ -2560,7 +3286,6 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  /** Physical deflection: the ball reflects off the contact surface, so WHERE it hits decides where it goes. */
   private deflect(p: Footballer, speed: number, keep: number, save: boolean): void {
     this.shotMissed();
     this.carrier = null;
@@ -2571,9 +3296,8 @@ class RetroKickScene extends Phaser.Scene {
     const inVx = this.ballVx; const inVy = this.ballVy;
     const r = reflect(inVx, inVy, nx, ny, keep, 0.85);
     let ox = r.x; let oy = r.y;
-    if (Math.hypot(ox, oy) < 60) { ox += nx * 60; oy += ny * 60; }   // never let it die against the player
+    if (Math.hypot(ox, oy) < 60) { ox += nx * 60; oy += ny * 60; }
     this.ballVx = ox; this.ballVy = oy;
-    // a glancing blow puts spin on the ball
     const vt = (inVx * -ny + inVy * nx) / (speed || 1);
     this.ballCurl = Phaser.Math.Clamp(vt * 0.7, -0.6, 0.6);
     this.ballVSpin = 0;
@@ -2663,7 +3387,6 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ ACTIONS (open play) ═══════════════
 
-  /** Pass to a point: driven along the ground (speed scaled to distance) or lofted over defenders (lands on target). */
   private playPass(c: Footballer, lead: Pt, lob: boolean, fast = false): void {
     const d = dist(this.ball.x, this.ball.y, lead.x, lead.y);
     const ang = Math.atan2(lead.y - this.ball.y, lead.x - this.ball.x);
@@ -2676,7 +3399,6 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  /** X = driven pass, C + X = lofted pass. Picks the best-scored teammate, favouring your movement direction. */
   private passBall(): void {
     if (this.gkHolder) return;
     const lob = this.keys.C.isDown;
@@ -2700,10 +3422,6 @@ class RetroKickScene extends Phaser.Scene {
     this.setMessage(lob ? '↗ Lofted pass' : '→ Pass played');
   }
 
-  /**
-   * One routine for every shot, human or CPU. Power sets speed (260–520); a curled shot is solved by
-   * simulation so it bends onto the target; power shots are less accurate.
-   */
   private takeShot(c: Footballer, targetY: number, power: number, high: boolean, curlOn: boolean): void {
     const att = c.side === 'home' ? 1 : -1;
     const goalX = att === 1 ? FIELD_W - LINE : LINE;
@@ -2714,14 +3432,13 @@ class RetroKickScene extends Phaser.Scene {
     let aim = Math.atan2(targetY - from.y, goalX - from.x);
     let curl = 0;
     if (curlOn) {
-      curl = 0.9 * (targetY >= from.y ? 1 : -1) * att;      // bend toward the target side
+      curl = 0.9 * (targetY >= from.y ? 1 : -1) * att;
       aim = solveAim(from, { x: goalX, y: targetY }, speed, lift, curl, 0);
     }
-    aim += (Math.random() - 0.5) * 2 * (0.01 + Math.max(0, p - 0.6) * 0.14);   // harder shots are wilder
+    aim += (Math.random() - 0.5) * 2 * (0.01 + Math.max(0, p - 0.6) * 0.14);
     this.kickBall(Math.cos(aim) * speed, Math.sin(aim) * speed, c, lift, 'shoot', { curl });
   }
 
-  /** Hold Z to charge. Up/Down aims at a corner. C = high shot. V = curled shot. */
   private shootBall(power: number): void {
     if (this.gkHolder) return;
     const me = this.controlled;
@@ -2737,7 +3454,7 @@ class RetroKickScene extends Phaser.Scene {
     const vIn = Number(down) - Number(up);
     const targetY = CENTER_Y + (vIn !== 0 ? vIn * (GOAL_HALF - 12) + Phaser.Math.Between(-6, 6) : Phaser.Math.Between(-30, 30));
     this.takeShot(me, targetY, power, high, curl);
-    this.playSound('shoot');
+    this.playSound('shoot', 0.5 + power * 0.6);
     this.setMessage(
       (power > 0.85 ? '💥 POWER SHOT!' : power < 0.6 ? '⚽ Soft shot' : '💥 SHOT!') + (high ? ' (high)' : '') + (curl ? ' (curled)' : '')
     );
@@ -2757,7 +3474,8 @@ class RetroKickScene extends Phaser.Scene {
     this.spawnDustParticles(me.sprite.x, me.sprite.y + 8);
 
     if (ballDist < 35 && this.possession === 'away') {
-      this.knockLoose(me, opponent);                         // knocked free and contested, not handed over
+      this.stats.home.tackles++;
+      this.knockLoose(me, opponent);
       this.selectControlled();
       this.setMessage('✓ Clean tackle — the ball runs loose!');
     } else if (d < 37) {
@@ -2771,7 +3489,6 @@ class RetroKickScene extends Phaser.Scene {
     }
   }
 
-  /** Single choke point for every kick. spin = curl (sidespin) and vspin (topspin +, backspin −). */
   private kickBall(vx: number, vy: number, kicker: Footballer, lift = 10, action?: ActionType, spin?: SpinSpec): void {
     this.gkHolder = null;
     this.carrier = null;
@@ -2785,7 +3502,10 @@ class RetroKickScene extends Phaser.Scene {
     this.registerTouch(kicker);
     kicker.cooldown = 0.25;
     if (action) this.playAction(kicker, action, Math.atan2(vy, vx));
-    if (action === 'pass') this.stats[kicker.side].passes++;
+    if (action === 'pass') {
+      this.stats[kicker.side].passes++;
+      this.pendingPass = { side: kicker.side, kicker };
+    }
     if (action === 'shoot') {
       this.stats[kicker.side].shots++;
       this.shooter = kicker;
@@ -2809,7 +3529,10 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private prepDemo(): void {
+    this.audio.unlock();
     this.paused = false;
+    this.entrance = null;
+    this.hidePanel();
     this.restart = null;
     this.state = 'playing';
     this.gkHolder = null;
@@ -2820,18 +3543,13 @@ class RetroKickScene extends Phaser.Scene {
     this.ballCurl = 0; this.ballVSpin = 0;
   }
 
-  /** Debug: fire one example of each kind of kick toward the away goal so the trajectories can be compared. */
   private fireDemo(kind: string): void {
     this.prepDemo();
     const shooter = this.players.find((p) => p.side === 'home' && p.role === 'FWD')!;
     const goalX = FIELD_W - LINE;
     const place = (x: number, y: number): void => this.ball.setPosition(x, y);
     switch (kind) {
-      case 'drivenPass': {
-        place(300, CENTER_Y);
-        this.kickBall(330, 0, shooter, 8, 'pass');
-        break;
-      }
+      case 'drivenPass': place(300, CENTER_Y); this.kickBall(330, 0, shooter, 8, 'pass'); break;
       case 'lobPass': {
         place(300, CENTER_Y);
         const l = solveLob(400);
@@ -2864,9 +3582,11 @@ class RetroKickScene extends Phaser.Scene {
 
   private awardFoul(fouler: TeamSide, x: number, y: number): void {
     this.foulCount[fouler]++;
+    this.stats[fouler].fouls++;
     const n = this.foulCount[fouler];
     const spec = decideFoul(fouler, x, y, n);
     this.startRestart(spec);
+    this.reactFoul(fouler, spec);
     this.playSound('tackle');
     const tag = n > FOUL_LIMIT ? ` (foul #${n} — accumulated)` : ` (foul #${n})`;
     this.setMessage(`⚑ FOUL by ${teamName(fouler)}${tag} · ${this.restart!.baseMsg}`);
@@ -2874,7 +3594,7 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ RESTART SYSTEM ═══════════════
 
-   private startKickoff(team: TeamSide): void {
+  private startKickoff(team: TeamSide): void {
     this.players.forEach((p) => {
       p.vx = 0; p.vy = 0; p.celebrating = false; p.act = null; p.cooldown = 0;
     });
@@ -3253,6 +3973,7 @@ class RetroKickScene extends Phaser.Scene {
     this.banner('4-SECOND RULE', msg.replace('⏱ 4-SECOND RULE! ', ''), 0xffd23f, 1800, 3);
     this.setMessage(`${msg} · ${this.restart!.baseMsg}`);
   }
+
   // ═══════════════ GOAL ═══════════════
 
   private scoreGoal(side: TeamSide): void {
@@ -3382,6 +4103,7 @@ class RetroKickScene extends Phaser.Scene {
       if (this.cameraShake <= 0) { this.cameraShake = 0; this.cameras.main.setScroll(0, -STAND); }
     }
   }
+
   // ═══════════════ SOUND ═══════════════
 
   private playSound(type: 'kick' | 'pass' | 'shoot' | 'tackle' | 'post' | 'bounce', intensity = 1): void {
@@ -3399,11 +4121,18 @@ class RetroKickScene extends Phaser.Scene {
     this.goalText.setAlpha(0);
     this.goalSubText.setAlpha(0);
     this.goalFlash.setAlpha(0);
-    this.cameras.main.setScroll(0, 0);
+    this.cameras.main.setScroll(0, -STAND);
     this.cameraShake = 0;
     this.restartLabel.setText('');
     this.aimGfx.clear();
+    this.markerGfx.clear();
     this.trail = [];
+    this.hidePanel();
+    this.bannerToken++;
+    this.bannerBg.setVisible(false); this.bannerTitle.setVisible(false); this.bannerSub.setVisible(false);
+    this.bannerUntil = 0; this.bannerPrio = 0;
+    this.entrance = null;
+    this.excite = { home: 0.2, away: 0.2 };
 
     this.homeScore = 0;
     this.awayScore = 0;
@@ -3418,6 +4147,7 @@ class RetroKickScene extends Phaser.Scene {
     this.gkHolder = null;
     this.shooter = null;
     this.shotCharging = false;
+    this.pendingPass = null;
     this.counterUntil = { home: 0, away: 0 };
     this.stats = { home: freshStats(), away: freshStats() };
     this.foulCount = { home: 0, away: 0 };
@@ -3446,17 +4176,14 @@ class RetroKickScene extends Phaser.Scene {
   private updateHud(): void {
     if (this.homeScoreEl) this.homeScoreEl.textContent = String(this.homeScore);
     if (this.awayScoreEl) this.awayScoreEl.textContent = String(this.awayScore);
-    if (this.clockEl) {
-      const mins = String(Math.floor(this.remaining / 60)).padStart(2, '0');
-      const secs = String(this.remaining % 60).padStart(2, '0');
-      this.clockEl.textContent = `${mins}:${secs}`;
-    }
+    if (this.clockEl) this.clockEl.textContent = formatClock(this.remaining);
     if (this.periodEl) {
       this.periodEl.textContent = this.half === 1 ? 'FIRST HALF' : this.half === 2 ? 'SECOND HALF' : 'EXTRA TIME';
     }
     if (this.statusEl && this.message) {
       this.statusEl.innerHTML = `<span class="status-icon">▶</span> ${this.message}`;
     }
+    this.updateScoreboard();
   }
 
   private setMessage(message: string): void {
@@ -3473,10 +4200,10 @@ const game = new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'game-root',
   width: FIELD_W,
-  height: FIELD_H,
-  backgroundColor: '#1b6849',
+  height: GAME_H,
+  backgroundColor: '#0b0f15',
   antialias: false,
-  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: FIELD_W, height: FIELD_H },
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: FIELD_W, height: GAME_H },
   render: { pixelArt: true, roundPixels: true },
   scene: [RetroKickScene],
 });
