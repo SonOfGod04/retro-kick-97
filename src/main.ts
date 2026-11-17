@@ -3354,12 +3354,11 @@ class RetroKickScene extends Phaser.Scene {
   private updateCamera(dt: number): void {
     if (this.cameraShake > 0) {
       const intensity = this.cameraShake * 8;
-      this.cameras.main.setScroll(Phaser.Math.Between(-intensity, intensity), Phaser.Math.Between(-intensity, intensity));
+      this.cameras.main.setScroll(Phaser.Math.Between(-intensity, intensity), -STAND + Phaser.Math.Between(-intensity, intensity));
       this.cameraShake -= dt;
-      if (this.cameraShake <= 0) { this.cameraShake = 0; this.cameras.main.setScroll(0, 0); }
+      if (this.cameraShake <= 0) { this.cameraShake = 0; this.cameras.main.setScroll(0, -STAND); }
     }
   }
-
   // ═══════════════ SOUND ═══════════════
 
   private playSound(type: 'kick' | 'pass' | 'shoot' | 'tackle' | 'post' | 'bounce', intensity = 1): void {
