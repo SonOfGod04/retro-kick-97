@@ -3362,19 +3362,8 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ SOUND ═══════════════
 
-  private playSound(type: 'kick' | 'pass' | 'shoot' | 'goal' | 'tackle' | 'post' | 'bounce'): void {
-    if (!this.audioCtx) return;
-    try {
-      switch (type) {
-        case 'kick': this.beep('square', 200, null, 0.12, 0.1); break;
-        case 'pass': this.beep('triangle', 350, null, 0.08, 0.08); break;
-        case 'shoot': this.beep('sawtooth', 180, 80, 0.15, 0.2); break;
-        case 'tackle': this.beep('square', 120, null, 0.12, 0.06); break;
-        case 'post': this.beep('triangle', 620, 380, 0.2, 0.22); break;
-        case 'bounce': this.beep('sine', 150, 90, 0.07, 0.05); break;
-        case 'goal': [523, 659, 784, 1047].forEach((f, i) => this.beep('square', f, null, 0.12, 0.25, i * 0.12)); break;
-      }
-    } catch (_e) { /* audio context may be suspended */ }
+  private playSound(type: 'kick' | 'pass' | 'shoot' | 'tackle' | 'post' | 'bounce', intensity = 1): void {
+    this.audio.sfx(type, intensity);
   }
 
   // ═══════════════ HELPERS ═══════════════
