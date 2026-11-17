@@ -2874,7 +2874,7 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ RESTART SYSTEM ═══════════════
 
-  private startKickoff(team: TeamSide): void {
+   private startKickoff(team: TeamSide): void {
     this.players.forEach((p) => {
       p.vx = 0; p.vy = 0; p.celebrating = false; p.act = null; p.cooldown = 0;
     });
@@ -2890,6 +2890,7 @@ class RetroKickScene extends Phaser.Scene {
     this.indirectPending = null;
     this.shooter = null;
     this.shotCharging = false;
+    this.pendingPass = null;
     this.carrier = null;
     this.passTarget = null;
     this.oneTwo = null;
@@ -2918,6 +2919,7 @@ class RetroKickScene extends Phaser.Scene {
     if (snap) this.snapToLayout(r);
     this.aimGfx.clear();
     this.setMessage(r.baseMsg);
+    this.refSignalRestart(spec);
   }
 
   private pickTaker(spec: RestartSpec): Footballer {
@@ -3054,10 +3056,19 @@ class RetroKickScene extends Phaser.Scene {
     });
   }
 
+  /** A pulsing ring marks the restart spot so both teams' restarts are clearly visible. */
+  private drawRestartMarker(r: Restart): void {
+    const g = this.markerGfx;
+    g.clear();
+    const pulse = 0.5 + 0.5 * Math.sin(this.time.now * 0.008);
+    g.lineStyle(2, r.team === 'home' ? 0x4da3ff : 0xff6b6b, 0.5 + 0.4 * pulse).strokeCircle(r.x, r.y, 11 + 2 * pulse);
+  }
+
   private updateRestart(dt: number): void {
     const r = this.restart;
     if (!r) { this.state = 'playing'; return; }
     r.elapsed += dt;
+    this.drawRestartMarker(r);
 
     this.ball.setPosition(r.x, r.y);
     this.ballVx = 0; this.ballVy = 0; this.ballVz = 0; this.ballHeight = 0;
@@ -3186,13 +3197,13 @@ class RetroKickScene extends Phaser.Scene {
       lift = shotLiftFor(speed, Math.abs(goalX - r.x), r.lofted);
     }
 
-    // Corners are whipped in: the curl bends the ball toward the goal
     let spin: SpinSpec | undefined;
     if (r.kind === 'corner') {
       const ux = Math.cos(aim); const uy = Math.sin(aim);
       const toGx = goalX - r.x; const toGy = CENTER_Y - r.y;
       const sgn = Math.sign(-uy * toGx + ux * toGy) || 1;
       spin = { curl: 0.45 * sgn };
+      this.stats[r.team].corners++;
     }
 
     this.restart = null;
@@ -3200,12 +3211,18 @@ class RetroKickScene extends Phaser.Scene {
     this.kickoffLock = 0.25;
     this.restartLabel.setText('');
     this.aimGfx.clear();
+    this.markerGfx.clear();
 
     this.kickBall(vx, vy, r.taker, lift, action, spin);
     r.taker.cooldown = 1.0;
-    this.indirectPending = info.indirect ? { team: r.team, taker: r.taker } : null;
+    this.indirectPending = info.indirect ? { team: r.team, taker: r.taker, kind: r.kind } : null;
     if (r.kind === 'penalty') this.keeperAnticipate(other(r.team));
 
+    if (r.kind === 'kickoff') {                      // the referee starts the match / restarts it after a goal
+      this.audio.sfx('whistleShort');
+      this.playAction(this.referee, 'whistle');
+      this.audio.crowd('chant', 0.5);
+    }
     if (r.kind === 'penalty' || r.kind === 'second-penalty') { this.playSound('shoot'); this.cameraShake = 0.2; }
     else this.playSound('kick');
     if (r.team === 'home') this.selectControlled();
@@ -3231,9 +3248,11 @@ class RetroKickScene extends Phaser.Scene {
         msg = '⏱ 4-SECOND RULE! Indirect free kick to ' + teamName(opp); break;
     }
     this.startRestart(spec);
+    this.audio.sfx('whistleShort');
+    this.playAction(this.referee, 'whistle');
+    this.banner('4-SECOND RULE', msg.replace('⏱ 4-SECOND RULE! ', ''), 0xffd23f, 1800, 3);
     this.setMessage(`${msg} · ${this.restart!.baseMsg}`);
   }
-
   // ═══════════════ GOAL ═══════════════
 
   private scoreGoal(side: TeamSide): void {
