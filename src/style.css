@@ -39,7 +39,7 @@ h1 em{font-style:normal;color:#e9c76c}
 .match-clock{font:9px 'DM Mono',monospace;color:#a5b5a8;display:flex;justify-content:center;align-items:center;gap:5px;margin-top:8px;white-space:nowrap}
 .match-clock .clock-dot{width:5px;height:5px;background:#e9c76c}
 .canvas-wrap{position:relative;width:100%;background:#1b6849;overflow:hidden;line-height:0}
-#game-root{width:100%;aspect-ratio:900/520}
+#game-root{width:100%;aspect-ratio:900/632}
 #game-root canvas{display:block;width:100%!important;height:100%!important;object-fit:contain}
 .canvas-hint{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font:700 11px 'DM Mono',monospace;letter-spacing:1px;color:#f6f3d9;background:#14231de8;padding:12px 15px;border:1px solid #f6f3d944;border-radius:3px;white-space:nowrap;pointer-events:none;animation:pulse 1.8s infinite}
 @keyframes pulse{50%{opacity:.62}}
