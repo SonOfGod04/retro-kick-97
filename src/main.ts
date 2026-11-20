@@ -1,7 +1,12 @@
 import Phaser from 'phaser';
 import './style.css';
 import { GameAudio } from './audio';
-
+import {
+  TEAMS, DIFFS, HALF_OPTIONS, STYLE, setStyles, resolveStyles, colorDistance, scaleColor,
+  defaultSettings, sanitizeSettings, settingsFromQuery, loadSettings,
+} from './settings';
+import type { MatchSettings, DiffParams } from './settings';
+import { nextSelectable, cycleIndex } from './ui';
 // ═══════════════ CONSTANTS ═══════════════
 const FIELD_W = 900;
 const FIELD_H = 520;
