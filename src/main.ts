@@ -296,7 +296,7 @@ const REF_KIT: Kit = {
 
 // ═══════════════ PURE RULE FUNCTIONS (Phase 1) ═══════════════
 const other = (s: TeamSide): TeamSide => (s === 'home' ? 'away' : 'home');
-const teamName = (s: TeamSide): string => (s === 'home' ? 'Rockets' : 'Comets');
+const teamName = (s: TeamSide): string => STYLE[s].name;
 const dist = Phaser.Math.Distance.Between;
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 const easeOut = (u: number): number => 1 - (1 - u) * (1 - u);
