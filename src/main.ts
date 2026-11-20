@@ -38,7 +38,6 @@ const RECOVER_T = 0.45;
 const HAND_R = 11;
 const Z_WIN = 11;
 const BODY_R = 11;
-const GK_PREDICT_ERR = 6;
 
 // Ball physics (Phase 5)
 const G = 400;
