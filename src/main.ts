@@ -9,7 +9,7 @@ const STAND = 56;                         // height of each spectator stand (abo
 const GAME_H = FIELD_H + STAND * 2;       // the canvas is taller than the pitch to fit the arena
 const TUNNEL_Y = -72;                     // players enter from here (above the top stand, off-screen)
 const HALF_SECONDS = 120;
-const EXTRA_TIME_SECONDS = 60;
+const EXTRA_TIME_SECONDS = 60;            // improved
 const CENTER_X = FIELD_W / 2;
 const CENTER_Y = FIELD_H / 2;
 const LINE = 19;
@@ -688,7 +688,7 @@ function scorePass(from: Pt, to: Pt, att: number, opps: Pt[], T: TacticParams, l
   s -= Math.max(0, d - 150) * T.shortBias * 0.15;
   s += Math.max(0, 300 - Math.abs(goalX - to.x)) * 0.05;
   return s;
-}
+} 
 
 function shotQuality(pos: Pt, att: number, opps: Pt[], gk: Pt | null): number {
   const goalX = att === 1 ? FIELD_W - LINE : LINE;
