@@ -3038,9 +3038,10 @@ class RetroKickScene extends Phaser.Scene {
     if (Math.abs(last.y - CENTER_Y) > GOAL_HALF + 10) return;
     if (last.z > GOAL_HEIGHT + 8) return;
 
-    const react = Phaser.Math.FloatBetween(0.12, 0.2);
+    const dp = p.side === 'away' ? this.diff : DIFFS.normal;      // difficulty only changes the CPU keeper
+    const react = Phaser.Math.FloatBetween(dp.gkReact[0], dp.gkReact[1]);
     const err = {
-      y: Phaser.Math.FloatBetween(-GK_PREDICT_ERR, GK_PREDICT_ERR),
+      y: Phaser.Math.FloatBetween(-dp.gkErr, dp.gkErr),
       z: Phaser.Math.FloatBetween(-5, 5),
     };
     const plan = chooseSave(p.sprite.x, p.sprite.y, dirIn, samples, react, err);
