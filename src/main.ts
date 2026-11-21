@@ -269,22 +269,18 @@ const SKINS: number[][] = [[0xf4c892, 0xd9a877], [0xd9a066, 0xb98048], [0x8d5a3b
 const HAIRS: number[] = [0x2a1810, 0x111111, 0x3a2418, 0x6b4a2b];
 
 function makeKit(side: TeamSide, role: Footballer['role'], number: number): Kit {
-  const isGK = role === 'GK';
+  const st = STYLE[side];
   const [skin, skinShade] = SKINS[(number * 3 + (side === 'home' ? 0 : 2)) % SKINS.length];
   const hair = HAIRS[(number + (side === 'home' ? 1 : 3)) % HAIRS.length];
-  if (isGK) {
+  if (role === 'GK') {
     return {
-      jersey: side === 'home' ? 0x9b59b6 : 0xff9800,
-      jerseyDark: side === 'home' ? 0x6c3483 : 0xc77700,
+      jersey: st.gk, jerseyDark: scaleColor(st.gk, 0.65),
       shorts: 0x333333, socks: 0x333333, boots: 0x111111,
       skin, skinShade, hair, glove: 0xffe14d, longSleeves: true,
     };
   }
   return {
-    jersey: side === 'home' ? 0x2d7fff : 0xff3b47,
-    jerseyDark: side === 'home' ? 0x0a4fb5 : 0xb01822,
-    shorts: side === 'home' ? 0x0a4fb5 : 0xb01822,
-    socks: 0xffffff, boots: 0x161616,
+    jersey: st.jersey, jerseyDark: st.jerseyDark, shorts: st.shorts, socks: st.socks, boots: 0x161616,
     skin, skinShade, hair, glove: skin, longSleeves: false,
   };
 }
