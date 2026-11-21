@@ -1593,8 +1593,6 @@ class RetroKickScene extends Phaser.Scene {
     const top = 70;
     const bg = this.add.rectangle(cx, CENTER_Y, 520, 390, 0x0b1b2b, 0.92).setStrokeStyle(3, 0xffd23f).setDepth(70);
     this.panelTitle = this.add.text(cx, top + 8, '', { fontFamily: font, fontSize: '30px', color: '#ffd23f', stroke: '#000000', strokeThickness: 4 }).setOrigin(0.5, 0).setDepth(71);
-    this.panelHN.setText(STYLE.home.short).setColor(hex(STYLE.home.accent));
-    this.panelAN.setText(STYLE.away.short).setColor(hex(STYLE.away.accent));
     this.panelScore = this.add.text(cx, top + 48, '', { fontFamily: font, fontSize: '48px', color: '#ffffff', stroke: '#000000', strokeThickness: 5 }).setOrigin(0.5, 0).setDepth(71);
     this.panelSub = this.add.text(cx, top + 108, '', { fontFamily: font, fontSize: '18px', color: '#cfd8e3', stroke: '#000000', strokeThickness: 3 }).setOrigin(0.5, 0).setDepth(71);
     const hn = this.add.text(cx - 150, top + 136, 'ROCKETS', { fontFamily: font, fontSize: '16px', color: '#8ec5ff' }).setOrigin(0.5, 0).setDepth(71);
@@ -1639,6 +1637,8 @@ class RetroKickScene extends Phaser.Scene {
   private showPanel(title: string, sub: string, hint: string, withStats: boolean): void {
     this.panelItems.forEach((o) => (o as Phaser.GameObjects.Components.Visible & Phaser.GameObjects.GameObject).setVisible(true));
     this.panelTitle.setText(title);
+    this.panelHN.setText(STYLE.home.short).setColor(hex(STYLE.home.accent));
+    this.panelAN.setText(STYLE.away.short).setColor(hex(STYLE.away.accent));
     this.panelScore.setText(withStats ? `${this.homeScore} – ${this.awayScore}` : '');
     this.panelSub.setText(sub);
     this.panelHint.setText(hint);
