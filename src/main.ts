@@ -267,6 +267,7 @@ function classifyLocomotion(speed: number): 'idle' | 'walk' | 'run' | 'sprint' {
 
 const SKINS: number[][] = [[0xf4c892, 0xd9a877], [0xd9a066, 0xb98048], [0x8d5a3b, 0x6e4328], [0x5b3a29, 0x452b1e]];
 const HAIRS: number[] = [0x2a1810, 0x111111, 0x3a2418, 0x6b4a2b];
+const NEUTRAL_FANS = [0xffd23f, 0x222222, 0x06d6a0];
 
 function makeKit(side: TeamSide, role: Footballer['role'], number: number): Kit {
   const st = STYLE[side];
