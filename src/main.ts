@@ -1508,8 +1508,8 @@ class RetroKickScene extends Phaser.Scene {
     const g = this.add.graphics().setDepth(6);
     g.fillStyle(0x05080c, 0.94).fillRoundedRect(cx - 215, y0, 430, 46, 8);
     g.lineStyle(2, 0x3b4a5e, 1).strokeRoundedRect(cx - 215, y0, 430, 46, 8);
-    g.fillStyle(0x2d7fff, 1).fillRect(cx - 209, y0 + 6, 5, 22);
-    g.fillStyle(0xff3b47, 1).fillRect(cx + 204, y0 + 6, 5, 22);
+    this.sbTabH = this.add.rectangle(cx - 206.5, y0 + 17, 5, 22, 0x2d7fff).setDepth(7);
+    this.sbTabA = this.add.rectangle(cx + 206.5, y0 + 17, 5, 22, 0xff3b47).setDepth(7);
     const font = 'Barlow Condensed, Arial Black, sans-serif';
     const mk = (x: number, y: number, size: string, color: string, ox: number): Phaser.GameObjects.Text =>
       this.add.text(x, y, '', { fontFamily: font, fontSize: size, color, stroke: '#000000', strokeThickness: 2 }).setOrigin(ox, 0.5).setDepth(7);
