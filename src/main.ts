@@ -2335,9 +2335,9 @@ class RetroKickScene extends Phaser.Scene {
     this.clockAcc = 0;
     if (this.half === 1) {
       this.half = 2;
-      this.remaining = HALF_SECONDS;
+      this.remaining = this.halfSeconds;
       this.beginHalftime();
-    } else if (this.half === 2 && this.homeScore === this.awayScore) {
+    } else if (this.half === 2 && this.homeScore === this.awayScore && this.settings.extraTime) {
       this.half = 3;
       this.remaining = EXTRA_TIME_SECONDS;
       this.startKickoff(this.openingKickoff);
