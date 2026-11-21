@@ -1529,6 +1529,8 @@ class RetroKickScene extends Phaser.Scene {
     if (!this.sbClock) return;
     const set = (tx: Phaser.GameObjects.Text, s: string): void => { if (tx.text !== s) tx.setText(s); };
     set(this.sbHomeScore, String(this.homeScore));
+    set(this.sbHomeName, STYLE.home.short);
+    set(this.sbAwayName, STYLE.away.short);
     set(this.sbAwayScore, String(this.awayScore));
     set(this.sbClock, formatClock(this.remaining));
     const per = this.state === 'halftime' ? 'HALF-TIME'
