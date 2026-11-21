@@ -3473,7 +3473,7 @@ class RetroKickScene extends Phaser.Scene {
       curl = 0.9 * (targetY >= from.y ? 1 : -1) * att;
       aim = solveAim(from, { x: goalX, y: targetY }, speed, lift, curl, 0);
     }
-    aim += (Math.random() - 0.5) * 2 * (0.01 + Math.max(0, p - 0.6) * 0.14);
+    aim += (Math.random() - 0.5) * 2 * (0.01 + Math.max(0, p - 0.6) * 0.14 + (c.side === 'away' ? this.diff.shotErr : 0));
     this.kickBall(Math.cos(aim) * speed, Math.sin(aim) * speed, c, lift, 'shoot', { curl });
   }
 
