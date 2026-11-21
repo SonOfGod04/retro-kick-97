@@ -1345,7 +1345,7 @@ class RetroKickScene extends Phaser.Scene {
     for (const f of this.flagSpots) {
       const e = this.excite[f.side];
       const wave = Math.sin(t * (3 + e * 6) + f.ph) * (2 + e * 4);
-      const col = f.side === 'home' ? 0x2d7fff : 0xff3b47;
+      const col = STYLE[f.side].jersey;
       fg.lineStyle(1, 0xdddddd, 1).lineBetween(f.x, f.y, f.x, f.y - 12 - e * 3);
       fg.fillStyle(col, 1).fillTriangle(f.x, f.y - 12 - e * 3, f.x + 9 + wave, f.y - 9 - e * 3, f.x, f.y - 6 - e * 3);
     }
