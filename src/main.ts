@@ -950,6 +950,38 @@ function runSelfTests(): void {
   au.toggleMute();
   au.setVolume(0.5);
   t('P6 audio status shows the volume once unmuted', !au.muted && au.status().includes('VOL 50%'));
+
+  // ── Phase 7 (part 1)
+  const kinds = ['info', 'action', 'spacer', 'option', 'action'];
+  t('P7 menu navigation skips headings and spacers', nextSelectable(kinds, -1, 1) === 1 && nextSelectable(kinds, 1, 1) === 3 && nextSelectable(kinds, 3, 1) === 4);
+  t('P7 menu navigation wraps around both ways', nextSelectable(kinds, 4, 1) === 1 && nextSelectable(kinds, 1, -1) === 4);
+  t('P7 option cycling wraps', cycleIndex(0, -1, 7) === 6 && cycleIndex(6, 1, 7) === 0 && cycleIndex(2, 1, 7) === 3);
+  t('P7 difficulty scales the CPU',
+    DIFFS.easy.cpuSpeed < DIFFS.normal.cpuSpeed && DIFFS.normal.cpuSpeed < DIFFS.hard.cpuSpeed &&
+    DIFFS.easy.gkReact[0] > DIFFS.hard.gkReact[1] && DIFFS.easy.gkErr > DIFFS.normal.gkErr && DIFFS.normal.gkErr > DIFFS.hard.gkErr &&
+    DIFFS.easy.tackleWin < DIFFS.normal.tackleWin && DIFFS.normal.tackleWin < DIFFS.hard.tackleWin && DIFFS.easy.think > DIFFS.hard.think);
+  const ds = defaultSettings();
+  t('P7 default settings are valid', ds.homeTeam < TEAMS.length && ds.awayTeam < TEAMS.length && HALF_OPTIONS[ds.halfIdx] === 120 && !!DIFFS[ds.difficulty]);
+  t('P7 corrupt saved settings fall back to defaults',
+    JSON.stringify(sanitizeSettings({ homeTeam: 99, difficulty: 'insane', halfIdx: -3 })) === JSON.stringify(ds) &&
+    JSON.stringify(sanitizeSettings(null)) === JSON.stringify(ds));
+  const kept = sanitizeSettings({ homeTeam: 3, awayTeam: 2, difficulty: 'hard', halfIdx: 3, extraTime: false, homeTactic: 'press', awayTactic: 'counter' });
+  t('P7 valid saved settings are kept',
+    kept.homeTeam === 3 && kept.awayTeam === 2 && kept.difficulty === 'hard' && kept.halfIdx === 3 &&
+    !kept.extraTime && kept.homeTactic === 'press' && kept.awayTactic === 'counter');
+  const q1 = settingsFromQuery(new URLSearchParams('team=3&opp=2&level=hard&half=60&extra=0&tactic=press&home=counter'), defaultSettings());
+  t('P7 URL options set teams, level, half length, extra time and tactics',
+    q1.homeTeam === 3 && q1.awayTeam === 2 && q1.difficulty === 'hard' && q1.halfIdx === 0 &&
+    !q1.extraTime && q1.awayTactic === 'press' && q1.homeTactic === 'counter');
+  t('P7 invalid URL options are ignored',
+    JSON.stringify(settingsFromQuery(new URLSearchParams('team=99&level=insane&half=77&tactic=bogus'), defaultSettings())) === JSON.stringify(ds));
+  t('P7 identical teams get distinguishable kits',
+    TEAMS.every((_, i) => { const r = resolveStyles(i, i); return colorDistance(r.home.jersey, r.away.jersey) >= 120; }));
+  const gkOk = (r: ReturnType<typeof resolveStyles>): boolean =>
+    colorDistance(r.home.gk, r.home.jersey) >= 70 && colorDistance(r.home.gk, r.away.jersey) >= 70 &&
+    colorDistance(r.away.gk, r.away.jersey) >= 70 && colorDistance(r.away.gk, r.home.jersey) >= 70 && r.home.gk !== r.away.gk;
+  t('P7 keepers stand out from both teams and from each other (default and identical teams)',
+    gkOk(resolveStyles(0, 1)) && TEAMS.every((_, i) => gkOk(resolveStyles(i, i))));
   const failed = results.filter((r) => !r[1]);
   results.forEach(([n, ok]) => console.log(`${ok ? '✅' : '❌'} ${n}`));
   console.log(failed.length === 0 ? `SELF-TEST: all ${results.length} passed` : `SELF-TEST: ${failed.length} FAILED`);
