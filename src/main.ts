@@ -1243,10 +1243,8 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   /** Two stands of about 400 spectators each. Home fans (blue) left, away fans (red) right. */
+    /** Two stands of about 400 spectators each. Each side's fans wear their team's colours. */
   private createArena(): void {
-    const homeShirts = [0x2d7fff, 0x0a4fb5, 0xffffff, 0x5aa0ff];
-    const awayShirts = [0xff3b47, 0xb01822, 0xffffff, 0xff7a82];
-    const neutral = [0xffd23f, 0x222222, 0x06d6a0];
     for (const top of [true, false]) {
       const y0 = top ? -STAND : FIELD_H;
       const wall = this.add.graphics().setDepth(1);
@@ -1266,14 +1264,18 @@ class RetroKickScene extends Phaser.Scene {
           const g = this.add.graphics().setDepth(depth);
           const x0 = side === 'home' ? 5 : CENTER_X + 5;
           const x1 = side === 'home' ? CENTER_X - 5 : FIELD_W - 5;
+          const fans: CrowdRow['fans'] = [];
           for (let x = x0; x < x1; x += 9) {
-            const fx = x + Phaser.Math.FloatBetween(-1.2, 1.2);
-            const shirts = side === 'home' ? homeShirts : awayShirts;
-            const shirt = Math.random() < 0.14 ? neutral[Phaser.Math.Between(0, neutral.length - 1)] : shirts[Phaser.Math.Between(0, shirts.length - 1)];
-            g.fillStyle(shirt, 1).fillRect(fx - 2.6, rowY, 5.2, 7);
-            g.fillStyle(SKINS[Phaser.Math.Between(0, SKINS.length - 1)][0], 1).fillCircle(fx, rowY - 2.6, 2.5);
+            fans.push({
+              x: x + Phaser.Math.FloatBetween(-1.2, 1.2),
+              shirt: Phaser.Math.Between(0, 3),
+              neutral: Math.random() < 0.14 ? Phaser.Math.Between(0, NEUTRAL_FANS.length - 1) : -1,
+              skin: Phaser.Math.Between(0, SKINS.length - 1),
+            });
           }
-          this.crowdRows.push({ g, side, phase: r * 0.9 + (top ? 0 : 1.7) + (side === 'home' ? 0 : 0.4) });
+          const row: CrowdRow = { g, side, phase: r * 0.9 + (top ? 0 : 1.7) + (side === 'home' ? 0 : 0.4), rowY, fans };
+          this.crowdRows.push(row);
+          this.drawCrowdRow(row);
           if (front) {
             for (let k = 0; k < 5; k++) {
               this.flagSpots.push({ x: Phaser.Math.Between(x0 + 10, x1 - 10), y: rowY - 5, side, ph: Math.random() * 6 });
@@ -1284,6 +1286,21 @@ class RetroKickScene extends Phaser.Scene {
     }
     this.flagGfx = this.add.graphics().setDepth(3);
     this.flashGfx = this.add.graphics().setDepth(3.5);
+  }
+
+  private drawCrowdRow(row: CrowdRow): void {
+    const g = row.g;
+    g.clear();
+    const shirts = STYLE[row.side].fans;
+    for (const f of row.fans) {
+      const shirt = f.neutral >= 0 ? NEUTRAL_FANS[f.neutral] : shirts[f.shirt % shirts.length];
+      g.fillStyle(shirt, 1).fillRect(f.x - 2.6, row.rowY, 5.2, 7);
+      g.fillStyle(SKINS[f.skin][0], 1).fillCircle(f.x, row.rowY - 2.6, 2.5);
+    }
+  }
+
+  private recolorCrowd(): void {
+    this.crowdRows.forEach((r) => this.drawCrowdRow(r));
   }
 
   // ═══════════════ CROWD ═══════════════
