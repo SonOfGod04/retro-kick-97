@@ -982,6 +982,7 @@ function runSelfTests(): void {
     colorDistance(r.away.gk, r.away.jersey) >= 70 && colorDistance(r.away.gk, r.home.jersey) >= 70 && r.home.gk !== r.away.gk;
   t('P7 keepers stand out from both teams and from each other (default and identical teams)',
     gkOk(resolveStyles(0, 1)) && TEAMS.every((_, i) => gkOk(resolveStyles(i, i))));
+  
   const failed = results.filter((r) => !r[1]);
   results.forEach(([n, ok]) => console.log(`${ok ? '✅' : '❌'} ${n}`));
   console.log(failed.length === 0 ? `SELF-TEST: all ${results.length} passed` : `SELF-TEST: ${failed.length} FAILED`);
