@@ -1598,6 +1598,8 @@ class RetroKickScene extends Phaser.Scene {
     const hn = this.add.text(cx - 150, top + 136, 'ROCKETS', { fontFamily: font, fontSize: '16px', color: '#8ec5ff' }).setOrigin(0.5, 0).setDepth(71);
     const an = this.add.text(cx + 150, top + 136, 'COMETS', { fontFamily: font, fontSize: '16px', color: '#ff9aa2' }).setOrigin(0.5, 0).setDepth(71);
     this.panelItems = [bg, this.panelTitle, this.panelScore, this.panelSub, hn, an];
+    this.panelHN = hn;
+    this.panelAN = an;
     for (let i = 0; i < 9; i++) {
       const y = top + 160 + i * 22;
       const label = this.add.text(cx, y, '', { fontFamily: font, fontSize: '15px', color: '#ffd23f' }).setOrigin(0.5, 0).setDepth(71);
