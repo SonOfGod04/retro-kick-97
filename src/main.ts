@@ -1049,6 +1049,12 @@ class RetroKickScene extends Phaser.Scene {
   private excite: Record<TeamSide, number> = { home: 0.2, away: 0.2 };
   private crowdAudioT = 0;
   private entrance: Entrance | null = null;
+  private settings: MatchSettings = defaultSettings();
+  private halfSeconds = HALF_SECONDS;
+  private sbTabH!: Phaser.GameObjects.Rectangle;
+  private sbTabA!: Phaser.GameObjects.Rectangle;
+  private panelHN!: Phaser.GameObjects.Text;
+  private panelAN!: Phaser.GameObjects.Text;
   private halftimeT = 0;
   private sbHomeName!: Phaser.GameObjects.Text;
   private sbAwayName!: Phaser.GameObjects.Text;
