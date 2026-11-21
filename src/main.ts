@@ -154,6 +154,11 @@ interface TeamStats {
   poss: number; lineSum: number; lineN: number;
 }
 
+interface CrowdRow {
+  g: Phaser.GameObjects.Graphics; side: TeamSide; phase: number; rowY: number;
+  fans: { x: number; shirt: number; neutral: number; skin: number }[];
+}
+
 interface Entrance {
   t: number; short: boolean; lineT: number; announced: boolean; done: () => void;
   targets: Map<Footballer, { tx: number; ty: number; delay: number }>;
