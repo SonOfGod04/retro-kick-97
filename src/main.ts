@@ -1128,12 +1128,10 @@ class RetroKickScene extends Phaser.Scene {
     document.getElementById('restart-button')?.addEventListener('click', () => this.resetMatch());
 
     const qs = new URLSearchParams(window.location.search);
-    const fromUrl = (v: string | null): Tactic | null => (v && (TACTIC_ORDER as string[]).includes(v) ? (v as Tactic) : null);
-    this.tactics.away = fromUrl(qs.get('tactic')) ?? 'balanced';
-    this.tactics.home = fromUrl(qs.get('home')) ?? 'balanced';
-    this.updateTacticLabel();
+    this.settings = settingsFromQuery(qs, loadSettings());
+    this.applySettings();
     this.audioText.setText(this.audio.status());
-
+    
     // Debug hooks (only with ?selftest)
     //   retroKickDebug.react('goal'|'save'|'post'|'foul'|'penalty'|'miss'|'applause')  -> hear and see a crowd reaction
     //   retroKickDebug.demo('post'|'bar'|...) · shot('away',230,4) · tactic('away','press') · stats() · act(5,'shoot')
