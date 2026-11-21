@@ -377,7 +377,7 @@ function passAccuracy(ok: number, total: number): number {
   return total <= 0 ? 0 : Math.round((100 * ok) / total);
 }
 
-/** Crowd excitement relaxes back to its baseline: a spike fades slowly, a lull recovers quickly. */
+/**  excitement relaxes back to its baseline: a spike fades slowly, a lull recovers quickly. */
 function nextExcite(cur: number, base: number, dt: number): number {
   return cur > base ? cur - (cur - base) * (1 - Math.exp(-dt * 0.55)) : cur + (base - cur) * (1 - Math.exp(-dt * 2));
 }
@@ -924,10 +924,10 @@ function runSelfTests(): void {
   t('P6 pass accuracy handles zero passes', passAccuracy(0, 0) === 0 && passAccuracy(3, 4) === 75);
   let ex = 1.2;
   for (let n = 0; n < 180; n++) ex = nextExcite(ex, 0.3, 1 / 60);
-  t('P6 crowd excitement fades after a spike but never below its baseline', ex < 0.75 && ex >= 0.3);
+  t('P6  excitement fades after a spike but never below its baseline', ex < 0.75 && ex >= 0.3);
   let lull = 0.0;
   for (let n = 0; n < 120; n++) lull = nextExcite(lull, 0.4, 1 / 60);
-  t('P6 crowd excitement rises quickly to a new baseline', lull > 0.3 && lull <= 0.4);
+  t('P6  excitement rises quickly to a new baseline', lull > 0.3 && lull <= 0.4);
   t('P6 foul pips fill up to five, then turn red', pips(3).filled === 3 && !pips(3).red && pips(5).filled === 5 && !pips(5).red && pips(6).red);
   const hs = lineupSpot('home', 2); const as = lineupSpot('away', 2);
   t('P6 line-up puts the teams on opposite sides of the halfway line', hs.x < CENTER_X && as.x > CENTER_X && hs.y === as.y);
@@ -1035,8 +1035,8 @@ class RetroKickScene extends Phaser.Scene {
   private tacticText!: Phaser.GameObjects.Text;
   private audioText!: Phaser.GameObjects.Text;
 
-  // Phase 6: arena, crowd, presentation
-  private crowdRows: { g: Phaser.GameObjects.Graphics; side: TeamSide; phase: number }[] = [];
+  // Phase 6: arena, , presentation
+    private crowdRows: CrowdRow[] = [];
   private flagSpots: { x: number; y: number; side: TeamSide; ph: number }[] = [];
   private flagGfx!: Phaser.GameObjects.Graphics;
   private flashGfx!: Phaser.GameObjects.Graphics;
