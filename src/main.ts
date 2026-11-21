@@ -2852,11 +2852,14 @@ class RetroKickScene extends Phaser.Scene {
     p.cooldown = 0.4;
     this.playAction(p, 'tackle', Math.atan2(this.ball.y - p.sprite.y, this.ball.x - p.sprite.x));
     const roll = Phaser.Math.Between(0, 100);
-    if (roll < 10) {
+    const isHome = p.side === 'home';
+    const foulT = isHome ? 10 : this.diff.foul;
+    const winT = isHome ? 60 : this.diff.tackleWin;
+    if (roll < foulT) {
       this.awardFoul(p.side, this.ball.x, this.ball.y);
       return true;
     }
-    if (roll < 60) {
+    if (roll < winT) {
       this.stats[p.side].tackles++;
       const loser = p.side === 'home' ? this.carrier : this.controlled;
       this.playSound('tackle');
