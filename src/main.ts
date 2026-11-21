@@ -6,7 +6,9 @@ import {
   defaultSettings, sanitizeSettings, settingsFromQuery, loadSettings, saveSettings,
 } from './settings';
 import type { MatchSettings, DiffParams } from './settings';
-import { nextSelectable, cycleIndex } from './ui';
+import { MenuUI, nextSelectable, cycleIndex } from './ui';
+import { contextHint, CONTROLS_LINES, buildTitle, buildSetup, buildPause, buildConfirm, buildControls } from './screens';
+import type { ScreenHost } from './screens';
 
 // ═══════════════ CONSTANTS ═══════════════
 const FIELD_W = 900;
