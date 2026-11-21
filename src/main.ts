@@ -1385,7 +1385,7 @@ class RetroKickScene extends Phaser.Scene {
     this.flashBurst(30);
     const home = this.homeScore; const away = this.awayScore;
     this.banner('GOAL!', own ? `OWN GOAL · ${teamName(side)} ${home}–${away}` : `${teamName(side)} · #${num} · ${home}–${away}`,
-      side === 'home' ? 0x4da3ff : 0xff6b6b, 2400, 5);
+            STYLE[side].accent, 2400, 5);
     this.audio.speak(own ? `Own goal. ${teamName(side)} score.` : `Goal! ${teamName(side)}, number ${num}.`);
     const t = side === 'home' ? this.sbHomeScore : this.sbAwayScore;
     this.tweens.add({ targets: t, scale: { from: 1.7, to: 1 }, duration: 450, ease: 'Back.easeOut' });
