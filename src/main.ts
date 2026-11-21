@@ -2588,9 +2588,10 @@ class RetroKickScene extends Phaser.Scene {
     const foePts: Pt[] = foes.map((f) => ({ x: f.sprite.x, y: f.sprite.y }));
     const ball: Pt = { x: this.ball.x, y: this.ball.y };
     const counter = now < this.counterUntil[side];
-    const SPR = 175 * T.tempo * (counter ? 1.08 : 1);
-    const RUN = 150 * T.tempo;
-    const JOG = 105 * T.tempo;
+    const spd = side === 'away' ? this.diff.cpuSpeed : 1;
+    const SPR = 175 * T.tempo * (counter ? 1.08 : 1) * spd;
+    const RUN = 150 * T.tempo * spd;
+    const JOG = 105 * T.tempo * spd;
     const orders = new Map<Footballer, Order>();
     const shape = (p: Footballer, ph: Phase): Order => {
       const tg = shapeTarget({ x: p.homeX, y: p.homeY, role: p.role }, side, ph, tac, ball);
