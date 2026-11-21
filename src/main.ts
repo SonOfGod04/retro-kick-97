@@ -4170,7 +4170,7 @@ class RetroKickScene extends Phaser.Scene {
 
     this.homeScore = 0;
     this.awayScore = 0;
-    this.remaining = HALF_SECONDS;
+    this.remaining = this.halfSeconds;
     this.half = 1;
     this.paused = false;
     this.ended = false;
