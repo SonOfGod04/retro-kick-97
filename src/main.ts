@@ -2805,8 +2805,7 @@ class RetroKickScene extends Phaser.Scene {
       }
     }
     const nl = Math.hypot(dx, dy) || 1;
-    return { x: pos.x + (dx / nl) * 80, y: pos.y + (dy / nl) * 80, speed: 150 * T.tempo * (counter ? 1.12 : 1) };
-  }
+    return { x: pos.x + (dx / nl) * 80, y: pos.y + (dy / nl) * 80, speed: 150 * T.tempo * (counter ? 1.12 : 1) * this.diff.cpuSpeed };
 
   private carryBallAI(c: Footballer): void {
     if (this.possession !== c.side || this.gkHolder || c.cooldown > 0) return;
