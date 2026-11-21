@@ -1148,6 +1148,7 @@ class RetroKickScene extends Phaser.Scene {
         react: (kind: string) => this.debugReact(kind),
       };
     }
+    
 
     this.selectControlled();
     this.startEntrance(false, () => this.startKickoff(this.openingKickoff));
@@ -4190,6 +4191,27 @@ class RetroKickScene extends Phaser.Scene {
     this.startKickoff(this.openingKickoff);
     this.updateHud();
     this.setMessage('New match — ' + this.restart!.baseMsg);
+  }
+
+  private get diff(): DiffParams {
+    return DIFFS[this.settings.difficulty];
+  }
+
+  /** Applies the current settings: kits, fans, scoreboard colours, tactics and half length. */
+  private applySettings(): void {
+    const s = this.settings;
+    setStyles(s.homeTeam, s.awayTeam);
+    for (const p of this.players) p.kit = makeKit(p.side, p.role, p.number);
+    this.recolorCrowd();
+    this.sbTabH.setFillStyle(STYLE.home.jersey);
+    this.sbTabA.setFillStyle(STYLE.away.jersey);
+    this.sbHomeName.setColor(hex(STYLE.home.accent));
+    this.sbAwayName.setColor(hex(STYLE.away.accent));
+    this.tactics = { home: s.homeTactic, away: s.awayTactic };
+    this.halfSeconds = HALF_OPTIONS[s.halfIdx];
+    this.remaining = this.halfSeconds;
+    this.updateTacticLabel();
+    this.updateHud();
   }
 
   private selectControlled(): void {
