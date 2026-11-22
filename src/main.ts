@@ -1038,6 +1038,12 @@ class RetroKickScene extends Phaser.Scene {
   private half = 1;
   private paused = true;
   private pauseKeyHeld = false;
+  private menu!: MenuUI;
+  private pauseMenu = false;
+  private hintText!: Phaser.GameObjects.Text;
+  private hintLast = '';
+  private ctrlGfx!: Phaser.GameObjects.Graphics;
+  private floaters: Phaser.GameObjects.Text[] = [];
   private ended = false;
   private kickoffLock = 0;
   private state: GameState = 'intro';
