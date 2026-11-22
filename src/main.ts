@@ -2279,22 +2279,37 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   update(time: number, delta: number): void {
-    if (Phaser.Input.Keyboard.JustDown(this.keys.T)) this.cycleTactic('away');
-    if (Phaser.Input.Keyboard.JustDown(this.keys.G)) this.cycleTactic('home');
-    this.handleAudioKeys();
-
-    if (this.keys.P.isDown && !this.pauseKeyHeld) {
-      this.paused = !this.paused;
-      this.pauseKeyHeld = true;
-      this.setMessage(this.paused ? 'Paused — press P to resume' : this.restart ? this.restart.baseMsg : 'Play on!');
-    }
-    if (this.keys.P.isUp) this.pauseKeyHeld = false;
-    if (this.paused) return;
-
     const dt = Math.min(delta / 1000, 0.035);
+    const J = Phaser.Input.Keyboard.JustDown;
+    this.handleAudioKeys();
+    if (J(this.keys.F)) this.scale.toggleFullscreen();
 
-    if (Phaser.Input.Keyboard.JustDown(this.keys.ENTER)) {
-      if (this.ended) { this.resetMatch(); return; }
+    // a menu is open: only the menu reacts (the world stays frozen, apart from the crowd behind the start screen)
+    if (this.menu.isOpen()) {
+      this.handleMenuInput();
+      if (this.state === 'intro') { this.updateCrowd(dt); this.syncBallVisuals(); this.updateScoreboard(); }
+      this.hintText.setText('');
+      this.hintLast = '';
+      this.ctrlGfx.clear();
+      return;
+    }
+
+    if (J(this.keys.T)) this.cycleTactic('away');
+    if (J(this.keys.G)) this.cycleTactic('home');
+    const pressP = J(this.keys.P);
+    const pressEsc = J(this.keys.ESC);
+    if (this.ended) {
+      if (pressEsc) { this.quitToTitle(); return; }
+    } else if (pressP || pressEsc) {
+      this.openPause();
+      return;
+    }
+    if (J(this.keys.H)) { this.paused = true; this.openControls(() => this.resumeFromMenu()); return; }
+    if (this.paused) return;
+    this.updateGuides();
+
+    if (J(this.keys.ENTER)) {
+      if (this.ended) { this.resetMatch(false); return; }
       this.skipPresentation();
     }
 
