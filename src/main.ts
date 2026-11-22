@@ -1192,7 +1192,7 @@ class RetroKickScene extends Phaser.Scene {
 
     this.selectControlled();
     this.startEntrance(false, () => this.startKickoff(this.openingKickoff));
-    this.showPanel("RETRO KICK '97", 'FUTSAL · Rockets vs Comets', 'CLICK TO START', false);
+    this.openTitle();
     this.updateHud();
   }
 
