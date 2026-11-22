@@ -1157,16 +1157,16 @@ class RetroKickScene extends Phaser.Scene {
     this.periodEl = document.getElementById('period');
     this.statusEl = document.getElementById('status-message');
     this.hint = document.getElementById('canvas-hint');
+    this.menu = new MenuUI(this, CENTER_X, CENTER_Y, 580);
+    this.input.keyboard!.on('keydown', () => this.audio.unlock());    // browsers need a key press or click before audio can start
     this.input.on('pointerdown', () => {
       this.audio.unlock();
-      const wasPaused = this.paused;
-      if (this.ended) this.resetMatch();
-      this.paused = false;
-      if (this.hint) this.hint.style.display = 'none';
-      if (wasPaused && this.state === 'intro') this.hidePanel();     // first click: leave the title card
-      else if (!wasPaused) this.skipPresentation();                  // later clicks skip entrances / the half-time break
-      if (this.state === 'playing' || this.state === 'restart') this.setMessage(this.restart ? this.restart.baseMsg : 'Play on!');
+      if (this.menu.isOpen() || this.time.now - this.menu.lastPointerAt < 150) return;   // the menu handles its own clicks
+      if (this.ended) { this.resetMatch(false); return; }
+      if (!this.paused) this.skipPresentation();
     });
+    document.getElementById('restart-button')?.addEventListener('click', () => this.requestRestart());
+    if (this.hint) this.hint.style.display = 'none';
     document.getElementById('restart-button')?.addEventListener('click', () => this.resetMatch());
 
     const qs = new URLSearchParams(window.location.search);
