@@ -3611,6 +3611,7 @@ class RetroKickScene extends Phaser.Scene {
 
     if (ballDist < 35 && this.possession === 'away') {
       this.stats.home.tackles++;
+      this.floater('TACKLE WON', me.sprite.x, me.sprite.y, '#06d6a0');
       this.knockLoose(me, opponent);
       this.selectControlled();
       this.setMessage('✓ Clean tackle — the ball runs loose!');
