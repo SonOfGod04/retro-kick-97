@@ -4440,6 +4440,136 @@ class RetroKickScene extends Phaser.Scene {
     });
   }
 
+    // ═══════════════ MENUS (Phase 7) ═══════════════
+
+  private hostApi(): ScreenHost {
+    return {
+      settings: this.settings, audio: this.audio,
+      startMatch: () => this.startMatchFromMenu(),
+      resume: () => this.resumeFromMenu(),
+      restartMatch: () => this.restartFromMenu(),
+      quitToTitle: () => this.quitToTitle(),
+      persist: () => saveSettings(this.settings),
+      refreshAudio: () => this.audioText.setText(this.audio.status()),
+      goTitle: () => this.openTitle(),
+      goSetup: () => this.openSetup(),
+      goPause: () => this.openPause(),
+      goConfirm: (kind) => this.menu.open(buildConfirm(this.hostApi(), kind)),
+      goControls: (back) => this.openControls(back),
+    };
+  }
+
+  private openTitle(): void {
+    this.paused = true;
+    this.pauseMenu = false;
+    this.menu.open(buildTitle(this.hostApi()));
+  }
+
+  private openSetup(): void {
+    this.menu.open(buildSetup(this.hostApi()));
+  }
+
+  private openPause(): void {
+    this.paused = true;
+    this.pauseMenu = true;
+    this.menu.open(buildPause(this.hostApi()));
+  }
+
+  private openControls(back: () => void): void {
+    this.menu.open(buildControls(this.hostApi(), back));
+  }
+
+  /** Closes the menu and clears any key presses made while it was open, so nothing fires by accident. */
+  private closeMenu(): void {
+    this.menu.close();
+    this.input.keyboard!.resetKeys();
+  }
+
+  private resumeFromMenu(): void {
+    this.closeMenu();
+    this.pauseMenu = false;
+    this.paused = false;
+  }
+
+  private startMatchFromMenu(): void {
+    this.closeMenu();
+    this.pauseMenu = false;
+    this.applySettings();
+    saveSettings(this.settings);
+    this.resetMatch(true);                 // the teams walk out, then kick-off
+    this.paused = false;
+  }
+
+  private restartFromMenu(): void {
+    this.closeMenu();
+    this.pauseMenu = false;
+    this.resetMatch(false);
+    this.paused = false;
+  }
+
+  private quitToTitle(): void {
+    this.closeMenu();
+    this.resetMatch(true);
+    this.paused = true;
+    this.openTitle();
+  }
+
+  /** The DOM restart button: ask first, unless nothing would be lost. */
+  private requestRestart(): void {
+    this.audio.unlock();
+    if (this.menu.isOpen()) return;
+    if (this.ended) { this.resetMatch(false); return; }
+    this.paused = true;
+    this.pauseMenu = true;
+    this.menu.open(buildConfirm(this.hostApi(), 'restart'));
+  }
+
+  private handleMenuInput(): void {
+    const J = Phaser.Input.Keyboard.JustDown;
+    const k = this.keys;
+    const m = this.menu;
+    if (J(k.UP) || J(k.W)) m.move(-1);
+    if (J(k.DOWN) || J(k.S)) m.move(1);
+    if (J(k.LEFT) || J(k.A)) m.left();
+    if (J(k.RIGHT) || J(k.D)) m.right();
+    if (J(k.ENTER) || J(k.SPACE)) m.activate();
+    if (J(k.ESC)) m.back();
+    if (J(k.P) && this.pauseMenu && m.isOpen()) this.resumeFromMenu();
+  }
+
+  // ═══════════════ IN-GAME GUIDANCE (Phase 7) ═══════════════
+
+  /** The hint line under the pitch and the arrow over the player you control. */
+  private updateGuides(): void {
+    const r = this.restart;
+    const homeRestart = this.state === 'restart' && r && r.team === 'home' ? r.kind : null;
+    const hint = contextHint(this.state, this.possession === 'home', homeRestart, r ? RESTART_INFO[r.kind].limit !== null : false);
+    if (hint !== this.hintLast) { this.hintLast = hint; this.hintText.setText(hint); }
+
+    const g = this.ctrlGfx;
+    g.clear();
+    if (this.state === 'playing' || this.state === 'restart') {
+      const p = this.controlled;
+      const x = p.sprite.x;
+      const y = p.sprite.y - 30 + Math.sin(this.time.now * 0.008) * 2;
+      g.fillStyle(0xffd23f, 1).fillTriangle(x - 5, y, x + 5, y, x, y + 7);
+      g.lineStyle(1.5, 0x000000, 0.9).strokeTriangle(x - 5, y, x + 5, y, x, y + 7);
+    }
+  }
+
+  /** A short pop-up that rises from a player: feedback for a completed pass, tackle, save, shot... */
+  private floater(text: string, x: number, y: number, color: string): void {
+    if (this.floaters.length >= 8) return;
+    const t = this.add.text(x, y - 22, text, {
+      fontFamily: 'Barlow Condensed, Arial Black, sans-serif', fontSize: '15px', color, stroke: '#000000', strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(55);
+    this.floaters.push(t);
+    this.tweens.add({
+      targets: t, y: y - 56, alpha: 0, duration: 950, ease: 'Cubic.easeOut',
+      onComplete: () => { this.floaters = this.floaters.filter((f) => f !== t); t.destroy(); },
+    });
+  }
+  
   private selectControlled(): void {
     this.controlled = this.nearestPlayer('home', this.ball.x, this.ball.y);
     this.refreshMarker();
