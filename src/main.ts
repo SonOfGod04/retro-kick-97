@@ -4249,6 +4249,9 @@ class RetroKickScene extends Phaser.Scene {
     this.particles.forEach((p) => p.obj.destroy());
     this.particles = [];
     this.tweens.killAll();
+    this.floaters.forEach((f) => f.destroy());
+    this.floaters = [];
+    this.ctrlGfx.clear();
 
     this.goalText.setAlpha(0);
     this.goalSubText.setAlpha(0);
