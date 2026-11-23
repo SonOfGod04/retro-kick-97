@@ -1771,6 +1771,7 @@ class RetroKickScene extends Phaser.Scene {
     this.entrance = null;
     this.hidePanel();
     e.done();
+    if (!e.short) this.banner('KICK-OFF', 'H = controls  ·  ESC = pause', 0x06d6a0, 3200, 2);
   }
 
   private beginHalftime(): void {
