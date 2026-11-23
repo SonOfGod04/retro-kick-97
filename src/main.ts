@@ -3773,6 +3773,10 @@ class RetroKickScene extends Phaser.Scene {
     this.aimGfx.clear();
     this.setMessage(r.baseMsg);
     this.refSignalRestart(spec);
+    if (spec.kind === 'kick-in' || spec.kind === 'corner' || spec.kind === 'goal-clearance' ||
+        spec.kind === 'free-kick' || spec.kind === 'indirect-free-kick') {
+      this.banner(info.label, `${teamName(spec.team)}${spec.team === 'home' ? ' — your restart' : ''}`, STYLE[spec.team].accent, 1100, 0);
+    }
   }
 
   private pickTaker(spec: RestartSpec): Footballer {
