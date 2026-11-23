@@ -2474,7 +2474,7 @@ class RetroKickScene extends Phaser.Scene {
       ? `Full-time. It finishes ${hs}, ${as}.`
       : `Full-time. ${hs > as ? 'Rockets' : 'Comets'} win, ${Math.max(hs, as)} ${Math.min(hs, as)}.`);
     if (this.hint) {
-      this.hint.textContent = 'FULL-TIME · CLICK TO PLAY AGAIN';
+      this.hint.textContent = 'FULL-TIME · ENTER = REMATCH · ESC = MENU';
       this.hint.style.display = 'block';
     }
   }
