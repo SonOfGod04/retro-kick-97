@@ -4244,7 +4244,7 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ HELPERS ═══════════════
 
-    private resetMatch(entrance = false): void {
+  private resetMatch(entrance = false): void {
     this.goalTimer?.remove(false);
     this.particles.forEach((p) => p.obj.destroy());
     this.particles = [];
