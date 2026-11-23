@@ -1439,6 +1439,7 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private reactSave(gk: Footballer): void {
+    this.floater('SAVE!', gk.sprite.x, gk.sprite.y, '#06d6a0');
     this.bumpCrowd(gk.side, 0.5);
     this.bumpCrowd(other(gk.side), 0.3);
     this.audio.sfx('glove');
