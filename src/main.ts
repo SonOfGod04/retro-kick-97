@@ -2956,6 +2956,7 @@ class RetroKickScene extends Phaser.Scene {
     }
     if (roll < winT) {
       this.stats[p.side].tackles++;
+      this.floater('TACKLE WON', p.sprite.x, p.sprite.y, p.side === 'home' ? '#06d6a0' : '#ff9aa2');
       const loser = p.side === 'home' ? this.carrier : this.controlled;
       this.playSound('tackle');
       this.knockLoose(p, loser);
