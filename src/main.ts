@@ -4287,9 +4287,14 @@ class RetroKickScene extends Phaser.Scene {
     this.stats = { home: freshStats(), away: freshStats() };
     this.foulCount = { home: 0, away: 0 };
     if (this.hint) this.hint.style.display = 'none';
-    this.startKickoff(this.openingKickoff);
-    this.updateHud();
-    this.setMessage('New match — ' + this.restart!.baseMsg);
+    if (entrance) {
+      this.startEntrance(false, () => this.startKickoff(this.openingKickoff));
+      this.updateHud();
+    } else {
+      this.startKickoff(this.openingKickoff);
+      this.updateHud();
+      this.setMessage('New match — ' + this.restart!.baseMsg);
+    }
   }
 
   private get diff(): DiffParams {
