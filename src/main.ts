@@ -2278,11 +2278,40 @@ class RetroKickScene extends Phaser.Scene {
     if (changed) this.audioText.setText(this.audio.status());
   }
 
-  update(time: number, delta: number): void {
+    update(time: number, delta: number): void {
     const dt = Math.min(delta / 1000, 0.035);
     const J = Phaser.Input.Keyboard.JustDown;
     this.handleAudioKeys();
     if (J(this.keys.F)) this.scale.toggleFullscreen();
+
+    // a menu is open: only the menu reacts (the world stays frozen, apart from the crowd behind the start screen)
+    if (this.menu.isOpen()) {
+      this.handleMenuInput();
+      if (this.state === 'intro') { this.updateCrowd(dt); this.syncBallVisuals(); this.updateScoreboard(); }
+      this.hintText.setText('');
+      this.hintLast = '';
+      this.ctrlGfx.clear();
+      return;
+    }
+
+    if (J(this.keys.T)) this.cycleTactic('away');
+    if (J(this.keys.G)) this.cycleTactic('home');
+    const pressP = J(this.keys.P);
+    const pressEsc = J(this.keys.ESC);
+    if (this.ended) {
+      if (pressEsc) { this.quitToTitle(); return; }
+    } else if (pressP || pressEsc) {
+      this.openPause();
+      return;
+    }
+    if (J(this.keys.H)) { this.paused = true; this.openControls(() => this.resumeFromMenu()); return; }
+    if (this.paused) return;
+    this.updateGuides();
+
+    if (J(this.keys.ENTER)) {
+      if (this.ended) { this.resetMatch(false); return; }
+      this.skipPresentation();
+    }
 
     // a menu is open: only the menu reacts (the world stays frozen, apart from the crowd behind the start screen)
     if (this.menu.isOpen()) {
