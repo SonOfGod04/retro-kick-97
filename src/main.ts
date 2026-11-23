@@ -3597,6 +3597,7 @@ class RetroKickScene extends Phaser.Scene {
       (power > 0.85 ? '💥 POWER SHOT!' : power < 0.6 ? '⚽ Soft shot' : '💥 SHOT!') + (high ? ' (high)' : '') + (curl ? ' (curled)' : '')
     );
     this.cameraShake = 0.06 + 0.1 * power;
+    this.floater(power > 0.85 ? 'POWER SHOT!' : power < 0.6 ? 'SOFT SHOT' : 'SHOT', me.sprite.x, me.sprite.y, '#ffd23f');
   }
 
   private tackle(): void {
