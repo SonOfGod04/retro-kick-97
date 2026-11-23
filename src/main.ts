@@ -3362,7 +3362,10 @@ class RetroKickScene extends Phaser.Scene {
     this.passTarget = null;
     // pass accuracy: a pass counts as completed when a team-mate touches the ball next
     if (this.pendingPass) {
-      if (p.side === this.pendingPass.side && p !== this.pendingPass.kicker) this.stats[p.side].passOk++;
+      if (p.side === this.pendingPass.side && p !== this.pendingPass.kicker) {
+        this.stats[p.side].passOk++;
+        if (p.side === 'home') this.floater('✓ PASS', p.sprite.x, p.sprite.y, '#06d6a0');
+      }
       this.pendingPass = null;
     }
     if (this.indirectPending && p !== this.indirectPending.taker) this.indirectPending = null;
