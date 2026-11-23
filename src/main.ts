@@ -2469,7 +2469,7 @@ class RetroKickScene extends Phaser.Scene {
     this.bumpCrowd(hs > as ? 'away' : 'home', 0.4);
     this.flashBurst(24);
     this.banner('FULL-TIME', `${teamName('home')} ${hs}–${as} ${teamName('away')}`, 0xffd23f, 3500, 6);
-    this.showPanel('FULL-TIME', result, 'CLICK or press ENTER to play again', true);
+    this.showPanel('FULL-TIME', result, 'ENTER or click: rematch   ·   ESC: main menu', true);
     this.audio.speak(hs === as
       ? `Full-time. It finishes ${hs}, ${as}.`
       : `Full-time. ${hs > as ? 'Rockets' : 'Comets'} win, ${Math.max(hs, as)} ${Math.min(hs, as)}.`);
