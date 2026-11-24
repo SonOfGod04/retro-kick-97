@@ -985,6 +985,63 @@ function runSelfTests(): void {
     colorDistance(r.away.gk, r.away.jersey) >= 70 && colorDistance(r.away.gk, r.home.jersey) >= 70 && r.home.gk !== r.away.gk;
   t('P7 keepers stand out from both teams and from each other (default and identical teams)',
     gkOk(resolveStyles(0, 1)) && TEAMS.every((_, i) => gkOk(resolveStyles(i, i))));
+
+    // ── Phase 7 (part 2)
+  t('P7 hint: with the ball shows shooting and passing', contextHint('playing', true, null, false).includes('Z shoot') && contextHint('playing', true, null, false).includes('X pass'));
+  t('P7 hint: without the ball shows tackling', contextHint('playing', false, null, false).includes('SPACE tackle'));
+  t('P7 hint: your restart explains aiming and the 4-second limit',
+    contextHint('restart', false, 'corner', true).includes('hold C') && contextHint('restart', false, 'corner', true).includes('4 s'));
+  t('P7 hint: kick-off has no time-limit text', !contextHint('restart', false, 'kickoff', false).includes('4 s'));
+  t('P7 hint: full-time offers rematch and menu', contextHint('fulltime', false, null, false).includes('ENTER') && contextHint('fulltime', false, null, false).includes('ESC'));
+  const helpText = CONTROLS_LINES.map((l) => l[0]).join(' | ');
+  t('P7 the controls screen explains every key',
+    ['WASD', 'SHIFT', 'Z shoot', 'X pass', 'C + Z', 'V + Z', 'SPACE', 'ESC', 'H this help', 'T CPU', 'G your', 'M mute', 'N announcer', 'F fullscreen', '4 seconds']
+      .every((k) => helpText.includes(k)));
+  const calls: string[] = [];
+  const fake: ScreenHost = {
+    settings: defaultSettings(), audio: new GameAudio(false),
+    startMatch: () => calls.push('start'), resume: () => calls.push('resume'), restartMatch: () => calls.push('restart'),
+    quitToTitle: () => calls.push('quit'), persist: () => calls.push('save'), refreshAudio: () => undefined,
+    goTitle: () => calls.push('title'), goSetup: () => calls.push('setup'), goPause: () => calls.push('pause'),
+    goConfirm: (k) => calls.push('confirm:' + k), goControls: () => calls.push('controls'),
+  };
+  const run = (fn: () => void): string => { calls.length = 0; fn(); return calls.join(','); };
+  const title = buildTitle(fake);
+  t('P7 title screen: play, settings and controls are wired',
+    run(() => title.items[0].onActivate?.()) === 'start' && run(() => title.items[1].onActivate?.()) === 'setup' &&
+    run(() => title.items[2].onActivate?.()) === 'controls');
+  const setup = buildSetup(fake);
+  const opts = setup.items.filter((i) => i.kind === 'option');
+  const s0 = fake.settings;
+  t('P7 setup offers team, opponent, difficulty, half length, extra time and both tactics', opts.length === 7);
+  t('P7 changing your team cycles it and saves', run(() => opts[0].onRight?.()) === 'save' && s0.homeTeam === 1);
+  opts[0].onLeft?.(); opts[0].onLeft?.();
+  t('P7 team selection wraps around', s0.homeTeam === TEAMS.length - 1);
+  opts[2].onRight?.();
+  t('P7 difficulty cycles from normal to hard and the label shows it', s0.difficulty === 'hard' && opts[2].label().includes('HARD'));
+  opts[3].onRight?.();
+  t('P7 half length cycles and is displayed', s0.halfIdx === 2 && opts[3].label().includes('3 MIN'));
+  opts[4].onRight?.();
+  t('P7 extra time toggles', s0.extraTime === false && opts[4].label().includes('OFF'));
+  opts[5].onRight?.();
+  t('P7 your tactic cycles', s0.homeTactic === 'press' && opts[5].label().includes('HIGH PRESS'));
+  t('P7 setup has start and back actions',
+    run(() => setup.items.find((i) => i.kind === 'action' && i.label().includes('START'))?.onActivate?.()) === 'start' &&
+    run(() => setup.onBack?.()) === 'title');
+  const pause = buildPause(fake);
+  t('P7 pause menu: resume, restart and quit ask first, ESC resumes',
+    run(() => pause.items[0].onActivate?.()) === 'resume' &&
+    run(() => pause.items.find((i) => i.label().includes('RESTART'))?.onActivate?.()) === 'confirm:restart' &&
+    run(() => pause.items.find((i) => i.label().includes('QUIT'))?.onActivate?.()) === 'confirm:quit' &&
+    run(() => pause.onBack?.()) === 'resume');
+  const conf = buildConfirm(fake, 'restart');
+  const confQ = buildConfirm(fake, 'quit');
+  t('P7 restart confirmation: yes restarts, no or ESC goes back',
+    run(() => conf.items[0].onActivate?.()) === 'restart' && run(() => conf.items[1].onActivate?.()) === 'pause' &&
+    run(() => conf.onBack?.()) === 'pause' && run(() => confQ.items[0].onActivate?.()) === 'quit');
+  const ctrl = buildControls(fake, () => calls.push('back'));
+  t('P7 controls screen: back works from the button and from ESC',
+    run(() => ctrl.items[ctrl.items.length - 1].onActivate?.()) === 'back' && run(() => ctrl.onBack?.()) === 'back');
   
   const failed = results.filter((r) => !r[1]);
   results.forEach(([n, ok]) => console.log(`${ok ? '✅' : '❌'} ${n}`));
