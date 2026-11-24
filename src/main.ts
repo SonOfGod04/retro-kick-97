@@ -3420,6 +3420,7 @@ class RetroKickScene extends Phaser.Scene {
       this.stats[best.side].intercepts++;
       this.controlBall(best);
       this.setMessage(`Intercepted by ${teamName(best.side)}`);
+      this.floater('INTERCEPT!', best.sprite.x, best.sprite.y, '#ffd23f');
     } else {
       this.deflect(best, speed, 0.5, false);
     }
