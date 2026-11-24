@@ -2925,6 +2925,7 @@ class RetroKickScene extends Phaser.Scene {
     this.takeShot(c, ty, power, Math.random() < 0.3, curlOn);
     this.playSound('shoot', 0.5 + power * 0.6);
     this.setMessage(`${power > 0.85 ? 'Power shot' : curlOn ? 'Curled shot' : 'Shot'} from ${teamName(side)}!`);
+    this.floater(power > 0.85 ? 'POWER SHOT' : 'SHOT', c.sprite.x, c.sprite.y, '#ff9aa2');
   }
 
   private cpuPass(c: Footballer, target: Footballer, lead: Pt, through: boolean, lob: boolean): void {
