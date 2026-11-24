@@ -3450,6 +3450,7 @@ class RetroKickScene extends Phaser.Scene {
     this.playSound('tackle');
     this.spawnDustParticles(this.ball.x, this.ball.y);
     this.setMessage(save ? '🧤 Parried!' : p.gk ? '🧤 Blocked by the keeper!' : 'Blocked!');
+    if (!p.gk) this.floater('BLOCKED', p.sprite.x, p.sprite.y, '#ffd23f');
   }
 
   private shotMissed(): void {
