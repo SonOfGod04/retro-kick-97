@@ -4072,7 +4072,7 @@ class RetroKickScene extends Phaser.Scene {
 
     const info = RESTART_INFO[r.kind];
     r.timer -= dt;
-    if (r.team === 'home') {
+    if (r.team === 'home' && !this.soak) {
       this.humanRestartInput(r, dt);
     } else {
       r.cpuDelay -= dt;
