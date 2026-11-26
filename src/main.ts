@@ -1208,7 +1208,7 @@ class RetroKickScene extends Phaser.Scene {
     this.createBanner();
     this.createPanel();
     this.keys = this.input.keyboard!.addKeys(
-      'W,A,S,D,UP,DOWN,LEFT,RIGHT,X,Z,C,V,SPACE,SHIFT,P,ENTER,T,G,M,N,OPEN_BRACKET,CLOSED_BRACKET,ESC,H,F'
+      'W,A,S,D,UP,DOWN,LEFT,RIGHT,X,Z,C,V,SPACE,SHIFT,P,ENTER,T,G,M,N,OPEN_BRACKET,CLOSED_BRACKET,ESC,H,F,BACKTICK'
     ) as Record<string, Phaser.Input.Keyboard.Key>;
     this.homeScoreEl = document.getElementById('home-score');
     this.awayScoreEl = document.getElementById('away-score');
