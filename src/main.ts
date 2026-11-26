@@ -2366,7 +2366,31 @@ class RetroKickScene extends Phaser.Scene {
     if (changed) this.audioText.setText(this.audio.status());
   }
 
-    update(time: number, delta: number): void {
+      /**
+   * One frame. A bug inside a frame is caught, counted and survived instead of freezing the game loop.
+   * With ?autotest the frame is simulated several times (fast-forward).
+   */
+  update(time: number, delta: number): void {
+    const t0 = performance.now();
+    const loops = this.soak && !this.paused ? this.soakSpeed : 1;
+    const dt = Math.min(delta / 1000, 0.035);
+    for (let i = 0; i < loops; i++) {
+      try {
+        this.tick(time, delta);
+        this.diagStep(dt);
+        this.errorStreak = 0;
+      } catch (e) {
+        this.reportError(e);
+        break;
+      }
+    }
+    this.perf.push(delta);
+    this.cpu.push((performance.now() - t0) / loops);
+    this.frameNo++;
+    if (this.showPerf && this.frameNo % 20 === 0) this.updatePerfText();
+  }
+
+  private tick(time: number, delta: number): void {
     const dt = Math.min(delta / 1000, 0.035);
     const J = Phaser.Input.Keyboard.JustDown;
     this.handleAudioKeys();
