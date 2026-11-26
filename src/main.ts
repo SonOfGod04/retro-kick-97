@@ -1939,6 +1939,9 @@ class RetroKickScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 0).setDepth(47);
     this.ctrlGfx = this.add.graphics().setDepth(48);
+    this.perfText = this.add
+      .text(6, -STAND + 2, '', { fontFamily: 'monospace', fontSize: '10px', color: '#9fe870', stroke: '#000000', strokeThickness: 2 })
+      .setDepth(100).setVisible(false);
 
   // ═══════════════ TEAMS ═══════════════
 
