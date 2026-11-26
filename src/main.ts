@@ -1829,6 +1829,7 @@ class RetroKickScene extends Phaser.Scene {
     const e = this.entrance;
     if (!e) { this.startKickoff(this.openingKickoff); return; }
     e.t += dt;
+    if (e.t > 14) { this.finishEntrance(); return; }               // never wait forever for a late player
     let allIn = true;
     for (const p of this.players) {
       const info = e.targets.get(p)!;
