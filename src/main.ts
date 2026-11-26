@@ -2395,6 +2395,7 @@ class RetroKickScene extends Phaser.Scene {
     const J = Phaser.Input.Keyboard.JustDown;
     this.handleAudioKeys();
     if (J(this.keys.F)) this.scale.toggleFullscreen();
+    if (J(this.keys.BACKTICK)) this.togglePerf();
 
     // a menu is open: only the menu reacts (the world stays frozen, apart from the crowd behind the start screen)
     if (this.menu.isOpen()) {
