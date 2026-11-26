@@ -2092,7 +2092,7 @@ class RetroKickScene extends Phaser.Scene {
     else if (moving && Math.abs(remaining) > 0.7) p.anim = 'turn';
     else p.anim = classifyLocomotion(p.speed);
 
-    this.drawPlayer(p, G2, remaining, moving);
+    if (y > -50) this.drawPlayer(p, G2, remaining, moving);       // players waiting in the tunnel are off-screen: skip drawing
     p.sprite.setDepth(20 + y / FIELD_H);
   }
 
