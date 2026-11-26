@@ -3416,6 +3416,7 @@ class RetroKickScene extends Phaser.Scene {
       vx: this.ballVx, vy: this.ballVy, vz: this.ballVz, curl: this.ballCurl, vspin: this.ballVSpin,
     };
     const ev = stepBall(s, dt);
+    if (!Number.isFinite(s.x + s.y + s.z + s.vx + s.vy + s.vz)) { this.resetBallToCenter(); return; }
     this.ball.x = s.x; this.ball.y = s.y; this.ballHeight = s.z;
     this.ballVx = s.vx; this.ballVy = s.vy; this.ballVz = s.vz;
     this.ballCurl = s.curl; this.ballVSpin = s.vspin;
