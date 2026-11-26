@@ -1268,6 +1268,14 @@ class RetroKickScene extends Phaser.Scene {
     this.selectControlled();
     this.startEntrance(false, () => this.startKickoff(this.openingKickoff));
     this.openTitle();
+    window.addEventListener('error', (ev) => { this.errorCount++; this.soak?.noteError(String(ev.message)); });
+    window.addEventListener('unhandledrejection', (ev) => { this.errorCount++; this.soak?.noteError('promise: ' + String(ev.reason)); });
+    // leaving the tab pauses the match (the pause menu is waiting when you come back)
+    this.game.events.on(Phaser.Core.Events.HIDDEN, () => {
+      if (!this.paused && !this.ended && !this.soak && !this.menu.isOpen()) this.openPause();
+    });
+    if (qs.has('perf')) { this.showPerf = true; this.perfText.setVisible(true); }
+    if (qs.has('autotest')) this.startSoak(parseInt(qs.get('autotest') || '4', 10) || 4, parseInt(qs.get('matches') || '3', 10) || 3);
     this.updateHud();
   }
 
