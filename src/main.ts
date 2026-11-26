@@ -9,6 +9,8 @@ import type { MatchSettings, DiffParams } from './settings';
 import { MenuUI, nextSelectable, cycleIndex } from './ui';
 import { contextHint, CONTROLS_LINES, buildTitle, buildSetup, buildPause, buildConfirm, buildControls } from './screens';
 import type { ScreenHost } from './screens';
+import { PerfMeter, LooseBallWatch, StateClock, SoakReport, checkInvariants } from './diagnostics';
+import type { Snapshot } from './diagnostics';
 
 // ═══════════════ CONSTANTS ═══════════════
 const FIELD_W = 900;
