@@ -2049,6 +2049,12 @@ class RetroKickScene extends Phaser.Scene {
   }
 
   private animatePlayer(p: Footballer, dt: number): void {
+      if (!Number.isFinite(p.sprite.x + p.sprite.y)) {                 // a corrupt position is repaired, not propagated
+      p.sprite.setPosition(p.homeX, p.homeY);
+      p.shadow.setPosition(p.homeX + 2, p.homeY + SHADOW_DY);
+      p.lastX = p.homeX; p.lastY = p.homeY; p.vx = 0; p.vy = 0;
+      return;
+    }
     const x = p.sprite.x;
     const y = p.sprite.y;
     const dx = x - p.lastX;
