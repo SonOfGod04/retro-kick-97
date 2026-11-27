@@ -1044,6 +1044,46 @@ function runSelfTests(): void {
   const ctrl = buildControls(fake, () => calls.push('back'));
   t('P7 controls screen: back works from the button and from ESC',
     run(() => ctrl.items[ctrl.items.length - 1].onActivate?.()) === 'back' && run(() => ctrl.onBack?.()) === 'back');
+
+
+    // ── Phase 8
+  const pm = new PerfMeter(10);
+  [16, 16, 16, 50].forEach((v) => pm.push(v));
+  t('P8 frame meter: average, fps, worst frame and slow-frame share',
+    Math.abs(pm.avgMs() - 24.5) < 1e-9 && Math.abs(pm.fps() - 40.816) < 0.01 && pm.worstMs() === 50 && pm.slowShare(25) === 0.25);
+  const lw = new LooseBallWatch(7);
+  let early = false;
+  for (let i = 0; i < 13; i++) if (lw.update(0.5, true)) early = true;
+  t('P8 dropped-ball watchdog fires only after 7 s of a loose, still ball', !early && lw.update(0.5, true));
+  const lw2 = new LooseBallWatch(7);
+  for (let i = 0; i < 13; i++) lw2.update(0.5, true);
+  lw2.update(0.5, false);
+  t('P8 dropped-ball watchdog resets when the ball moves', !lw2.update(0.5, true));
+  const sclk = new StateClock();
+  t('P8 stuck-state detector: normal play is fine, 60 s+ in one state is flagged',
+    !sclk.update('playing', 30).stuck && sclk.update('playing', 31).stuck && !sclk.update('restart', 1).stuck && !sclk.update('fulltime', 999).stuck);
+  const snap: Snapshot = {
+    state: 'playing', ball: { x: 450, y: 260, z: 0, vx: 100, vy: 0, vz: 0 }, players: [{ x: 100, y: 100 }],
+    remaining: 60, maxRemaining: 120, home: 1, away: 0, half: 1,
+  };
+  t('P8 invariants: a healthy game state has no problems', checkInvariants(snap, FIELD_W, FIELD_H).length === 0);
+  t('P8 invariants: a corrupt ball is caught',
+    checkInvariants({ ...snap, ball: { ...snap.ball, x: NaN } }, FIELD_W, FIELD_H).length === 1 &&
+    checkInvariants({ ...snap, ball: { ...snap.ball, x: 2000 } }, FIELD_W, FIELD_H).length >= 1 &&
+    checkInvariants({ ...snap, ball: { ...snap.ball, vx: 5000 } }, FIELD_W, FIELD_H).length >= 1);
+  t('P8 invariants: players off the pitch are only a problem while playing',
+    checkInvariants({ ...snap, players: [{ x: -50, y: 100 }] }, FIELD_W, FIELD_H).length === 1 &&
+    checkInvariants({ ...snap, state: 'intro', players: [{ x: 450, y: -72 }] }, FIELD_W, FIELD_H).length === 0);
+  t('P8 invariants: clock, score and period are validated',
+    checkInvariants({ ...snap, remaining: 500 }, FIELD_W, FIELD_H).length === 1 &&
+    checkInvariants({ ...snap, home: -1 }, FIELD_W, FIELD_H).length === 1 &&
+    checkInvariants({ ...snap, half: 4 }, FIELD_W, FIELD_H).length === 1);
+  const rep = new SoakReport();
+  const perfOk = { fps: 60, worstMs: 20, slowShare: 0 };
+  const okLines = rep.lines(perfOk).join('\n');
+  rep.note(['ball has a non-finite value']);
+  const badLines = rep.lines(perfOk).join('\n');
+  t('P8 soak report: pass and fail verdicts', okLines.includes('PASS') && !rep.passed() && badLines.includes('FAIL') && badLines.includes('non-finite'));
   
   const failed = results.filter((r) => !r[1]);
   results.forEach(([n, ok]) => console.log(`${ok ? '✅' : '❌'} ${n}`));
