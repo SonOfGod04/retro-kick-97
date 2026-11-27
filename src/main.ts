@@ -3061,20 +3061,26 @@ class RetroKickScene extends Phaser.Scene {
       }
     }
     const nl = Math.hypot(dx, dy) || 1;
-    return { x: pos.x + (dx / nl) * 80, y: pos.y + (dy / nl) * 80, speed: 150 * T.tempo * (counter ? 1.12 : 1) * this.diff.cpuSpeed };
+    return {
+      x: pos.x + (dx / nl) * 80,
+      y: pos.y + (dy / nl) * 80,
+      speed: 150 * T.tempo * (counter ? 1.12 : 1) * this.diff.cpuSpeed
+    };
+  } // Closes cpuCarrierThink()
 
   private carryBallAI(c: Footballer): void {
     if (this.possession !== c.side || this.gkHolder || c.cooldown > 0) return;
+
     if (dist(c.sprite.x, c.sprite.y, this.ball.x, this.ball.y) < 26) {
       this.ball.x = c.sprite.x + Math.cos(c.facing) * 15;
       this.ball.y = c.sprite.y + Math.sin(c.facing) * 15;
       this.ballVx = c.vx * 0.25;
       this.ballVy = c.vy * 0.25;
-      this.ballCurl = 0; this.ballVSpin = 0;
+      this.ballCurl = 0;
+      this.ballVSpin = 0;
       this.registerTouch(c);
     }
   }
-
   private cpuShoot(c: Footballer, q: number, dGoal: number): void {
     const side = c.side;
     const gk = this.keeperOf(other(side)).sprite;
