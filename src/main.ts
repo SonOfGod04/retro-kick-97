@@ -1981,7 +1981,7 @@ class RetroKickScene extends Phaser.Scene {
       .setOrigin(1, 1).setDepth(47);
   }
 
-    this.hintText = this.add
+  this.hintText = this.add
       .text(CENTER_X, FIELD_H + 18, '', {
         fontFamily: 'Barlow Condensed, Arial Black, sans-serif', fontSize: '13px', color: '#e8eef5',
         stroke: '#000000', strokeThickness: 3, align: 'center',
