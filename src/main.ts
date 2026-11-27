@@ -1938,7 +1938,7 @@ class RetroKickScene extends Phaser.Scene {
 
   // ═══════════════ OVERLAYS ═══════════════
 
-  private createOverlays(): void {
+   private createOverlays(): void {
     this.goalFlash = this.add
       .rectangle(FIELD_W / 2, CENTER_Y, FIELD_W, GAME_H, 0xffffff, 0)
       .setDepth(50).setAlpha(0);
@@ -1979,19 +1979,21 @@ class RetroKickScene extends Phaser.Scene {
         stroke: '#000000', strokeThickness: 3, align: 'right',
       })
       .setOrigin(1, 1).setDepth(47);
-  }
 
-  this.hintText = this.add
+    // Phase 7: context hint line and the arrow over the player you control
+    this.hintText = this.add
       .text(CENTER_X, FIELD_H + 18, '', {
         fontFamily: 'Barlow Condensed, Arial Black, sans-serif', fontSize: '13px', color: '#e8eef5',
         stroke: '#000000', strokeThickness: 3, align: 'center',
       })
       .setOrigin(0.5, 0).setDepth(47);
     this.ctrlGfx = this.add.graphics().setDepth(48);
+
+    // Phase 8: performance / soak-test overlay
     this.perfText = this.add
       .text(6, -STAND + 2, '', { fontFamily: 'monospace', fontSize: '10px', color: '#9fe870', stroke: '#000000', strokeThickness: 2 })
       .setDepth(100).setVisible(false);
-
+  }
   // ═══════════════ TEAMS ═══════════════
 
   private createTeams(): void {
